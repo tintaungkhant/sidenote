@@ -2,11 +2,11 @@
 
 ## Current repository
 
-The repository contains a Tauri 2, SvelteKit, Svelte 5, TypeScript, and Rust starter. The page and Rust command implement the template greeting only. There is no editor, persistence, or note model. SvelteKit uses static output with SSR disabled. Tauri build commands currently use Bun. Reuse this structure.
+The repository uses Tauri 2, SvelteKit, Svelte 5, TypeScript, and Rust. Ticket 001 replaces the template page with a CodeMirror editor and a versioned text/image model. Tailwind CSS 4 is installed through Vite. Ticket 002 adds native SQLite storage and typed frontend command wrappers. Ticket 003 connects the single-note editor to autosave, session preferences, guarded close/quit, and single-instance handling. Ticket 004 adds the tab shell and session restore. The native greeting command and unused opener plugin/access have been removed. SvelteKit uses static output with SSR disabled. Tauri build commands use Bun.
 
 ## UI stack
 
-Use Svelte 5, Tailwind CSS 4, and CodeMirror 6 within the existing SvelteKit and Tauri 2 application. Add Tailwind through its Vite integration. Tailwind is planned, not installed in the starter.
+Use Svelte 5, Tailwind CSS 4, and CodeMirror 6 within the existing SvelteKit and Tauri 2 application. Tailwind is installed through its Vite integration.
 
 Use Tailwind utilities for the shell, tabs, sidebar, toolbars, and layout. Keep CodeMirror themes and annotation canvas styling in dedicated CSS or the editor's theme API. Share color and spacing tokens where useful. Tailwind generates static CSS and adds no browser runtime. No component library is needed for the first release.
 
@@ -28,6 +28,16 @@ The CodeMirror adapter must map text positions and atomic image blocks losslessl
 
 Undo/redo must restore both image placement and associated annotation identity. Reusing the same source image in multiple blocks must not accidentally share mutable annotations.
 
+### Implemented editor encoding
+
+Each image occupies one U+FFFC character inside CodeMirror. A state-field sidecar maps that character's UTF-16 offset to its image block. Only sidecar-identified offsets are images: literal U+FFFC, marker-like strings, and arbitrary source text remain ordinary text. Conversion back to persisted blocks omits internal image characters. CodeMirror uses an explicit LF separator so CRLF and lone CR text are preserved rather than normalized.
+
+Transactions map surviving offsets and remove deleted images. History inversion restores the previous sidecar alongside the text, retaining image and annotation identities. Explicit image insertion and range movement update text and metadata in one transaction. Image decoration widgets use caller-provided local attachment sources; the host resolves immutable local originals on demand. Mounted widgets own and revoke their object URLs.
+
+Text copy/cut and literal search omit image positions. Image-only plain-text copy is empty. Mixed copy retains surrounding text; native image clipboard output is deferred to ticket 007. Native dragging is disabled. Default text-only line movement, line duplication, and transposition commands are suppressed when images exist; use the image-aware selection movement controls instead. The initial editor supports one selection.
+
+Svelte mounts one EditorView and destroys it on unmount. Native event behavior and resource lifetime still require non-visual native verification. Browser and visual verification remain excluded by the project constraint.
+
 ## Logical storage model
 
 - `notes`: stable ID, title, document schema version, document JSON, language, revision, creation/update timestamps, optional deletion timestamp.
@@ -37,6 +47,20 @@ Undo/redo must restore both image placement and associated annotation identity. 
 - Schema migrations use SQLite's version mechanism and run transactionally. Back up before a migration that could destroy or rewrite existing data.
 
 Application code validates document schema, attachment references, dimensions, annotation numbers/text sizes, and serialized payload limits. Database constraints enforce IDs and relationships. Use parameterized SQL. Validate note ownership of image references in native commands; do not accept arbitrary filesystem paths from document data.
+
+### Implemented native storage (ticket 002)
+
+`src-tauri/src/storage.rs` owns the database and its validation. `src-tauri/src/commands.rs` exposes eight focused commands; `src/lib/storage.ts` defines their frontend contracts. Startup opens `notes.sqlite3` under Tauri's OS-specific application-data directory for `com.ryan.simple-note`. Renderer inputs never select a database or filesystem path.
+
+The store uses `rusqlite` with bundled SQLite, avoiding a separately installed SQLite runtime. UUIDs identify notes, image blocks, and originals. The PNG/JPEG-only `image` dependency validates raster originals and derives MIME type and dimensions natively. `tempfile` provides isolated test stores and atomic recovery-export files. These dependencies provide SQLite transactions, stable identifiers, and maintained image decoding without an ORM or custom decoder.
+
+Schema version 1 includes notes, immutable-original attachments, foreign-key-backed note references, and a revisioned session row. Version-zero initialization runs in one transaction. Unknown versions, incomplete schemas, corrupt files, and initialization failures return errors without resetting data. No existing-data rewrite migration is needed yet; any future destructive migration must implement the backup requirement above before it is added. WAL and FULL synchronous mode protect acknowledged commits. Startup failure currently stops launch with a diagnostic; backup recovery UI remains ticket 009.
+
+Create and update validate a document before writing. Updates compare the expected revision and change content, references, and revision atomically. Responses describe that committed write rather than reloading potentially newer content after commit. Attachment reads require a persisted reference from the requested note. Shared originals are supported; removing references never collects original bytes, preserving future undo/Trash recovery. List queries select at most 200 metadata rows per page and exclude document JSON and image BLOBs. Session writes also compare expected revisions; absent session state has revision zero. Session tabs must have unique IDs, pinned tabs first, finite nonnegative scroll positions, and an active ID belonging to the tab list. Stale note IDs may remain in the saved session; ticket 004 filters them during restoration.
+
+Current native limits are 8 MiB serialized document JSON, 1,024 UTF-8 bytes per title, 100,000 blocks, 10,000 annotations per image block, 100,000 points per stroke, 64 KiB annotation text, 1,000 session tabs, and 1 MiB serialized session state. Supported language identifiers are `plaintext`, `markdown`, `javascript`, `typescript`, `json`, and `html`; the shell's display labels must be mapped to these identifiers during integration. Image originals are limited to 20 MiB encoded and 40 megapixels, with a 256 MiB decoder allocation budget. Annotation positions use original-image bounds; sizes must be finite, positive, and at most 4,096, and colors use `#RRGGBB`.
+
+Native store failures return `{ code, message }`. Tauri may reject malformed IPC argument shapes before the command body executes. Ticket 003 moves all SQLite access to one FIFO worker with enqueue-before-await acknowledgement. The current editor now automatically persists content. Native screenshot pixels are normalized to PNG and stored before insertion; mounted image widgets load originals on demand and revoke local object URLs when destroyed.
 
 ## Save ordering and lifecycle
 
@@ -53,6 +77,20 @@ Intercept normal window close and explicit quit on both OSes. Stop accepting new
 Use one application instance per data directory. A second launch focuses the existing window. This prevents competing session writers; revision checks still protect asynchronous saves within the instance.
 
 On startup, load metadata and session first, then active note content. Ignore stale session IDs safely without deleting notes. Never silently replace an unreadable database with an empty one. Report the error and offer backup recovery.
+
+### Implemented autosave and lifecycle (ticket 003)
+
+`src/lib/autosave.ts` tracks current input, local generations, acknowledged generations, and expected native revisions per note, plus separate session state. The editor registers loaded content as clean. Text/language changes schedule a fixed 250 ms batch from the first edit; subsequent typing does not reset that deadline. Completed image insertion or annotation-only transactions request an immediate flush. Saves carry immutable snapshots. Acknowledgements advance revisions and acknowledge only their captured generation; they never replace current content or undo history. Saved means every current generation has been acknowledged. Failed writes retain source and session state, show an actionable error, and allow retry without silently reloading stale data.
+
+Only one frontend drain runs at a time. Edits made while a transaction is in flight send their next snapshot after acknowledgement, using the newly acknowledged revision. A slow native transaction may exceed one second; the scheduler does not postpone attempts indefinitely, and it does not send competing writes with guessed revisions. `src-tauri/src/queue.rs` owns a dedicated FIFO worker and the SQLite connection. Commands enqueue before awaiting, rather than relying on blocking-pool scheduling or mutex acquisition order. A barrier acknowledges completion of previously submitted jobs before normal termination.
+
+`src/lib/exit.ts` shares one close attempt across repeated requests. Native window close, native quit, the Quit button, Windows Ctrl+Q, and macOS Cmd+Q all use the guarded lifecycle. The renderer registers its listener and acknowledges readiness before loading notes or admitting edits. Before that acknowledgement, native close exits directly because no local workspace edits can exist. Later close requests freeze editing, wait for startup, pending image insertion, and any recovery export, then flush every dirty note and session generation. Success authorizes native exit. Failure cancels the attempt, resumes the same editor, and offers retry, recovery export, and a separate confirmation before discarding unsaved changes. Confirmed discard drains submitted jobs when the worker is available; a stopped worker does not prevent explicitly authorized exit.
+
+The maintained Tauri single-instance plugin is registered first, before opening SQLite. With the fixed application-data location and bundle identifier, subsequent launches focus the existing main window and terminate before creating another store/session writer. `tokio` synchronization provides asynchronous result acknowledgements; SQLite work itself stays on the dedicated worker. No recurring idle save timer runs when state is clean.
+
+Startup reads session and paginated note metadata, ignores stale tab references, and loads only the active note body. Without a saved session it opens the newest existing note, or creates one empty note if no notes exist. Storage or decoding errors never trigger an empty replacement. The shell normalizes saved tabs against live note metadata, preserving intentional empty sessions. It supports creation, activation, rename, pinning, keyboard reorder, close, and in-session reopen. One editor view is mounted; immutable cached editor states retain independent undo histories. Session selection, scroll, pins, order, active ID, wrapping, and sidebar visibility are persisted. Tab operations are serialized and awaited by guarded exit. See ticket 004 for shortcut definitions and title behavior. Ticket 005 adds read-only native screenshot paste through arboard, prioritizing images over plain-text fallback. Paste freezes edits and tab transitions until original storage completes, and guarded exit awaits that operation. Native screenshot-tool verification on both platforms remains pending.
+
+Emergency recovery export uses a native save dialog through the Rust dialog plugin; the renderer cannot supply a filesystem destination. It writes version-one JSON containing current note snapshots, session state, and available original attachment bytes. Source snapshots up to 64 MiB remain exportable even when ordinary note limits reject a save. Originals are streamed one at a time, and missing or unreadable originals are explicitly marked and counted in the UI. A stopped store worker still permits a source-only export. A temporary file is flushed and synced before replacing the chosen destination; cancellation and failure do not report success. This is an emergency source artifact, not SQLite backup/restore; the backup and restore UI remains ticket 009.
 
 ## Image handling and security
 

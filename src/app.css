@@ -1,0 +1,12 @@
+@import 'tailwindcss';
+
+/* CodeMirror owns its theme; these rules apply to the surrounding shell. */
+:root { font-family: system-ui, sans-serif; color-scheme: dark; background: #1e1e1e; color: #d4d4d4; }
+html, body { margin: 0; height: 100%; }
+button, select, input { font: inherit; }
+button, select { cursor: pointer; }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid #75beff; outline-offset: 2px; }
+
+/* Shared shell tokens keep tabs, sidebar, and editor surfaces consistent. */
+:root { --editor: #1e1e1e; --surface: #252526; --border: #333; }
+button:disabled { cursor: default; opacity: 0.5; }
