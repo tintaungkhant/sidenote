@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { Autosave, type SaveTransport, type Timer } from './autosave';
 import { ExitGuard } from './exit';
 import type { Note, NoteId, NoteInput, Session } from './storage';
+import type { ImageBlock } from './editor/document';
 
 /** Advance promises without real clocks, browser APIs, or UI inspection. */
 async function settle() { for (let i = 0; i < 12; i++) await Promise.resolve(); }
@@ -53,6 +54,20 @@ function transport(overrides: Partial<SaveTransport> = {}): SaveTransport {
 }
 
 describe('autosave ordering and timing', () => {
+  /** Immediate annotation failures preserve the complete editable snapshot for retry and recovery. */
+  test('failed annotation save retains original reference and current geometry', async () => {
+    const block: ImageBlock = { kind: 'image', id: 'image' as ImageBlock['id'], attachmentId: 'original' as ImageBlock['attachmentId'],
+      annotations: [{ kind: 'text', x: 100, y: 50, text: 'keep caption', color: '#ffffff', fontSize: 24 }] };
+    const edited: NoteInput = { ...input(''), document: { version: 1, blocks: [block] } };
+    let fail = true;
+    const saver = new Autosave(transport({ updateNote: async (id, revision, value) => { if (fail) throw new Error('disk full'); return note(value, revision + 1, id); } }), { revision: 0, state: null }, () => {});
+    saver.register(note()); saver.edit(id, edited, true);
+    await settle();
+    expect(saver.status).toBe('Error');
+    expect(JSON.parse(saver.snapshot()).notes[0].input.document).toEqual(edited.document);
+    fail = false; await saver.flush();
+    expect(saver.status).toBe('Saved'); saver.stop();
+  });
   /** Sustained input must trigger commits throughout typing, rather than only after a quiet interval. */
   test('continuous typing keeps a bounded batch deadline', async () => {
     const clock = new Clock();

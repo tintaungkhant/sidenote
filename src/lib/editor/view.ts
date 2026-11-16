@@ -1,7 +1,8 @@
 /** Browser-only image presentation; callers provide local attachment sources. */
 import { Decoration, EditorView, WidgetType } from '@codemirror/view';
 import { imageField, selectionText } from './state';
-import type { AttachmentId } from './document';
+import type { AttachmentId, ImageBlock } from './document';
+import { annotationSvg } from './annotations';
 
 /** Copy or cut the selection, or current line when empty, without delegating marker-bearing text to CodeMirror. */
 function exportClipboard(event: ClipboardEvent, view: EditorView, cut: boolean): boolean {
@@ -17,37 +18,50 @@ function exportClipboard(event: ClipboardEvent, view: EditorView, cut: boolean):
 }
 
 class ImageWidget extends WidgetType {
-  constructor(readonly id: AttachmentId, readonly load: (id: AttachmentId) => Promise<Blob>) { super(); }
+  constructor(readonly block: ImageBlock, readonly load: (id: AttachmentId) => Promise<Blob>, readonly open: (block: ImageBlock) => void) { super(); }
   private release?: () => void;
   /** Stable identity permits widget reuse across text changes. */
-  eq(other: ImageWidget): boolean { return this.id === other.id && this.load === other.load; }
+  eq(other: ImageWidget): boolean { return this.block === other.block && this.load === other.load && this.open === other.open; }
   /** Load only mounted widgets; each widget owns and revokes its object URL. */
   toDOM(view: EditorView): HTMLElement {
     const image = document.createElement('img');
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = 'note-image-button';
+    button.setAttribute('aria-label', 'Annotate image');
+    button.onclick = () => this.open(this.block);
+    button.append(image);
     image.alt = 'Loading note image';
     image.className = 'note-image';
     image.draggable = false;
     let alive = true;
     let url: string | undefined;
     this.release = () => { alive = false; image.removeAttribute('src'); if (url) URL.revokeObjectURL(url); };
-    void this.load(this.id).then(blob => {
+    void this.load(this.block.attachmentId).then(blob => {
       if (!alive) return;
       url = URL.createObjectURL(blob);
-      image.onload = () => { if (alive) view.requestMeasure(); };
+      image.onload = () => {
+        if (!alive) return;
+        const overlay = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        overlay.setAttribute('viewBox', `0 0 ${image.naturalWidth} ${image.naturalHeight}`);
+        overlay.setAttribute('aria-hidden', 'true');
+        overlay.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none';
+        overlay.innerHTML = annotationSvg(this.block.annotations);
+        button.append(overlay); view.requestMeasure();
+      };
       image.src = url;
       image.alt = 'Note image';
     }).catch(() => { if (alive) { image.alt = 'Image unavailable; reopen the tab to retry'; view.requestMeasure(); } });
-    return image;
+    return button;
   }
   /** Dropped viewport widgets release decoded image resources, including late asynchronous loads. */
   destroy(): void { this.release?.(); }
 }
 
 /** Decorate sidecar positions only, preserving literal placeholder characters. */
-export function imagePresentation(load: (id: AttachmentId) => Promise<Blob>) {
+export function imagePresentation(load: (id: AttachmentId) => Promise<Blob>, open: (block: ImageBlock) => void = () => {}) {
   return [
     EditorView.decorations.compute([imageField], state => Decoration.set(
-      state.field(imageField).map(image => Decoration.replace({ widget: new ImageWidget(image.block.attachmentId, load) }).range(image.from, image.from + 1))
+      state.field(imageField).map(image => Decoration.replace({ widget: new ImageWidget(image.block, load, open) }).range(image.from, image.from + 1))
     )),
     EditorView.domEventHandlers({
       /** Export text without image markers; native image copy belongs to ticket 007. */
@@ -69,7 +83,8 @@ export function imagePresentation(load: (id: AttachmentId) => Promise<Blob>) {
       '.cm-activeLine': { backgroundColor: '#ffffff08' },
       '.cm-cursor': { borderLeftColor: '#ffffff' },
       '&.cm-focused .cm-selectionBackground, .cm-selectionBackground': { backgroundColor: '#264f78' },
-      '.note-image': { display: 'inline-block', maxWidth: '100%', maxHeight: '300px', verticalAlign: 'middle', margin: '4px' }
+      '.note-image-button': { position: 'relative', display: 'inline-block', maxWidth: '100%', padding: '0', border: '0', margin: '4px', verticalAlign: 'middle', lineHeight: '0' },
+      '.note-image': { display: 'block', maxWidth: '100%', maxHeight: '300px' }
     }, { dark: true })
   ];
 }

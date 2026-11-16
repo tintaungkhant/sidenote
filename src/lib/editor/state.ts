@@ -2,9 +2,15 @@
 import { EditorState, StateEffect, StateField, type Extension, type TransactionSpec } from '@codemirror/state';
 import { history, invertedEffects, isolateHistory } from '@codemirror/commands';
 import { SearchQuery } from '@codemirror/search';
-import { copyText, encodeDocument, type ImageBlock, type NoteDocument, type PlacedImage } from './document';
+import { copyText, encodeDocument, type Annotation, type ImageId, type ImageBlock, type NoteDocument, type PlacedImage } from './document';
 
 export const restoreImages = StateEffect.define<readonly PlacedImage[]>();
+
+/** Replace only one placement's annotations; retain original bytes and isolate each completed operation in history. */
+export function annotateImage(state: EditorState, id: ImageId, annotations: readonly Annotation[]): TransactionSpec {
+  return { effects: restoreImages.of(state.field(imageField).map(image => image.block.id === id
+    ? { ...image, block: { ...image.block, annotations } } : image)), userEvent: 'input.annotation', annotations: isolateHistory.of('full') };
+}
 
 export const imageField = StateField.define<readonly PlacedImage[]>({
   create: () => [],

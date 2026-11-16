@@ -11,7 +11,8 @@
   import { html } from '@codemirror/lang-html';
   import { markdown } from '@codemirror/lang-markdown';
   import { listen } from '@tauri-apps/api/event';
-  import { createNoteState, imageField, insertImage, moveRange, textSearch } from '$lib/editor/state';
+  import { createNoteState, imageField, insertImage, moveRange, textSearch, annotateImage } from '$lib/editor/state';
+  import AnnotationEditor from '$lib/editor/AnnotationEditor.svelte';
   import { decodeDocument, type AttachmentId, type ImageBlock, type ImageId } from '$lib/editor/document';
   import { imagePresentation } from '$lib/editor/view';
   import { Autosave, errorMessage, type SaveStatus } from '$lib/autosave';
@@ -40,6 +41,7 @@
   let loading = $state(true);
   let frozen = $state(false);
   let inserting = $state(false);
+  let annotation = $state.raw<{ block: ImageBlock; blob: Blob } | undefined>();
   let startupError = $state('');
   let saveError = $state('');
   let notice = $state('');
@@ -82,6 +84,7 @@
 
   /** Blur composition and freeze input during close/export; failed close resumes the same editor state. */
   function setFrozen(value: boolean) {
+    if (value) annotation = undefined;
     if (value) view?.contentDOM.blur();
     frozen = value;
     saver?.pause(value);
@@ -185,7 +188,7 @@
           if (cached) return cached;
           const original = await storage.loadAttachment(idForView, id);
           return new Blob([new Uint8Array(original.bytes)], { type: original.mimeType });
-        }),
+        }, openAnnotation),
         EditorView.contentAttributes.of({ 'aria-label': 'Note editor' }),
         EditorView.domEventHandlers({ paste(event) { return pasteScreenshot(event); } }),
         keymap.of([{ key: 'Mod-f', run: () => { document.getElementById('find')?.focus(); return true; } }, indentWithTab, ...editingKeys, ...historyKeymap]),
@@ -209,7 +212,7 @@
 
   /** Serialize tab operations and include pending note creation/loading in the close handshake. */
   function runTab(action: () => Promise<void> | void) {
-    if (busy || frozen || loading || insertion || startupError) return;
+    if (busy || frozen || loading || insertion || annotation || startupError) return;
     busy = true;
     transition = Promise.resolve().then(action).catch(error => { notice = errorMessage(error); }).finally(() => { busy = false; });
   }
@@ -315,6 +318,7 @@
 
   /** App shortcuts leave OS-reserved combinations and IME input untouched. */
   function quitShortcut(event: KeyboardEvent) {
+    if (annotation) return;
     const action = tabShortcut(event);
     if (!action) return;
     event.preventDefault();
@@ -397,6 +401,28 @@
     });
     return true;
   }
+
+  /** Load the immutable original before opening; keep tab identity stable while native I/O is pending. */
+  function openAnnotation(block: ImageBlock) {
+    if (!note || !view || frozen || busy || insertion || annotation) return;
+    const target = view, noteId = note.id;
+    inserting = true;
+    target.dispatch({ effects: editabilitySlot.reconfigure([EditorState.readOnly.of(true), EditorView.editable.of(false)]) });
+    insertion = (async () => {
+      let blob = sources.get(block.attachmentId);
+      if (!blob) {
+        const original = await storage.loadAttachment(noteId, block.attachmentId);
+        blob = new Blob([new Uint8Array(original.bytes)], { type: original.mimeType });
+      }
+      if (!disposed && !frozen && view === target) annotation = { block, blob };
+    })().catch(error => { notice = errorMessage(error); }).finally(() => {
+      inserting = false; insertion = undefined;
+      if (!disposed && view === target) target.dispatch({ effects: editabilitySlot.reconfigure([EditorState.readOnly.of(frozen), EditorView.editable.of(!frozen)]) });
+    });
+  }
+
+  /** Return to the unchanged editor selection and scroll; only unfinished canvas gestures are discarded. */
+  function closeAnnotation() { annotation = undefined; view?.focus(); }
 
   /** Retry saving in place; success preserves current content and undo history. */
   async function retrySave() {
@@ -506,3 +532,8 @@
     {#if notice}<span class="ml-3">{notice}</span>{/if}
   </footer>
 </main>
+{#if annotation}
+  <AnnotationEditor block={annotation.block} blob={annotation.blob} status={saveError ? `Could not save: ${saveError}. Your work remains open.` : saveStatus}
+    onchange={annotations => { if (view && annotation) view.dispatch(annotateImage(view.state, annotation.block.id, annotations)); }}
+    onclose={closeAnnotation} />
+{/if}

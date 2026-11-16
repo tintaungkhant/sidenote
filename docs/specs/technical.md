@@ -94,6 +94,8 @@ Emergency recovery export uses a native save dialog through the Rust dialog plug
 
 ## Image handling and security
 
+Ticket 006 renders editable annotations with SVG in original-image coordinates, sharing escaped vector markup between inline image buttons and a focused native modal dialog. Pointer positions map from the SVG's CSS rectangle without applying device pixel ratio. Completed gestures and text inputs replace only the targeted image placement's annotation array, use isolated CodeMirror history transactions, and immediately enter the existing autosave path. Local annotation undo/redo remains separate from note shortcuts. The modal traps focus; its key events do not reach note-level shortcuts. Exiting discards only the unfinished gesture, while completed operations already belong to the note and guarded exit flushes them normally. The immutable raster original is never rewritten. Object URLs are revoked when either view is destroyed. Rendered alignment and native interaction remain unverified under the no-browser/no-visual-test constraint.
+
 - Read native clipboard image data through a scoped native API. Browser clipboard support alone is insufficient proof on both OSes.
 - Initial limits: 20 MiB encoded input and 40 megapixels decoded per image. Check dimensions before allocating full decoded buffers where the decoder permits it. Explain rejection without altering the note.
 - Restrict input to decoded raster images; support native screenshot clipboard formats and PNG/JPEG. Normalize native clipboard pixels to a supported lossless stored format.

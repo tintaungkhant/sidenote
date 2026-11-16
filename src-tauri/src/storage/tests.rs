@@ -2,6 +2,45 @@
 use super::*;
 use image::ImageEncoder;
 
+/// Every tool survives an acknowledged edit and restart, with independent placements and unchanged originals.
+#[test]
+fn annotation_edit_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    let original = store.put_attachment(png()).unwrap();
+    let note = store.create_note(with_image(original.id)).unwrap();
+    let mut edited = with_image(original.id);
+    let annotations = serde_json::json!([
+        {"kind":"pen","points":[{"x":0.25,"y":0.5},{"x":0.75,"y":1.0}],"color":"#ff4444","width":4},
+        {"kind":"highlighter","points":[{"x":0.0,"y":0.5},{"x":1.0,"y":0.5}],"color":"#ffff00","width":16},
+        {"kind":"arrow","points":[{"x":0.0,"y":0.0},{"x":1.0,"y":1.0}],"color":"#3399ff","width":2},
+        {"kind":"text","x":0.5,"y":0.5,"text":"edited\ncaption","color":"#ffffff","fontSize":24}
+    ]);
+    if let Block::Image {
+        annotations: target,
+        ..
+    } = &mut edited.document.blocks[1]
+    {
+        *target = serde_json::from_value(annotations).unwrap();
+    }
+    let independent = with_image(original.id).document.blocks.pop().unwrap();
+    edited.document.blocks.push(independent.clone());
+    let expected = edited.document.clone();
+    store.update_note(note.summary.id, 1, edited).unwrap();
+    drop(store);
+    let reopened = Store::open(dir.path()).unwrap();
+    let loaded = reopened.load_note(note.summary.id).unwrap();
+    assert_eq!(loaded.document, expected);
+    assert_eq!(loaded.document.blocks[2], independent);
+    assert_eq!(
+        reopened
+            .load_attachment(note.summary.id, original.id)
+            .unwrap()
+            .bytes,
+        png()
+    );
+}
+
 /// Build a note fixture whose source text includes CRLF and literal editor marker characters.
 fn input() -> NoteInput {
     NoteInput {
