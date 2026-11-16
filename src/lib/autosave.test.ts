@@ -215,3 +215,24 @@ describe('close lifecycle', () => {
     expect(calls).toEqual(['prepared', 'discard:true']);
   });
 });
+
+/** Lifecycle changes wait for pending saves and remove old autosave identity before restoration. */
+test('lifecycle adopts atomic session only after pending saves finish', async () => {
+  const pending = deferred<Note>();
+  let calls = 0;
+  const saver = new Autosave(transport({ updateNote: async () => { calls++; return pending.promise; } }), { revision: 1, state: session() }, () => {}, new Clock());
+  saver.register(note());
+  saver.edit(id, input('latest'));
+  const flush = saver.flush();
+  expect(() => saver.forget(id, { revision: 3, state: session() })).toThrow();
+  pending.resolve(note(input('latest'), 2));
+  await flush;
+  expect(saver.revision(id)).toBe(2);
+  saver.forget(id, { revision: 3, state: { ...session(), tabs: [], activeNoteId: null } });
+  expect(() => saver.edit(id, input('stale'))).toThrow();
+  saver.register(note(input('latest'), 4));
+  expect(saver.revision(id)).toBe(4);
+  await saver.flush();
+  expect(calls).toBe(1);
+  expect(saver.dirty).toBe(false);
+});

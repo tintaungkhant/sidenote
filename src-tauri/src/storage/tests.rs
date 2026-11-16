@@ -472,3 +472,128 @@ fn acknowledged_commits_survive_forced_termination() {
         Some(id)
     );
 }
+
+/// Trash survives restart, invalidates stale saves, atomically removes tabs, and never collects shared originals.
+#[test]
+fn trash_restore_and_shared_originals() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    let image = store.put_attachment(png()).unwrap();
+    let first = store.create_note(with_image(image.id)).unwrap();
+    let second = store.create_note(with_image(image.id)).unwrap();
+    let session = Session {
+        version: 1,
+        tabs: vec![
+            Tab {
+                note_id: first.summary.id,
+                pinned: true,
+                anchor: 0,
+                head: 0,
+                scroll_top: 0.0,
+            },
+            Tab {
+                note_id: second.summary.id,
+                pinned: false,
+                anchor: 0,
+                head: 0,
+                scroll_top: 0.0,
+            },
+        ],
+        active_note_id: Some(first.summary.id),
+        sidebar_visible: true,
+        word_wrap: true,
+    };
+    store.save_session(0, session).unwrap();
+    assert!(
+        store
+            .change_note_lifecycle(first.summary.id, 1, "purge".into())
+            .is_err()
+    );
+    let saved = store
+        .change_note_lifecycle(first.summary.id, 1, "trash".into())
+        .unwrap();
+    assert_eq!(saved.revision, 2);
+    assert_eq!(saved.state.unwrap().active_note_id, Some(second.summary.id));
+    assert!(store.update_note(first.summary.id, 1, input()).is_err());
+    assert!(
+        store
+            .save_session(1, store.load_session().unwrap().state.unwrap())
+            .is_err()
+    );
+    drop(store);
+    let mut store = Store::open(dir.path()).unwrap();
+    assert_eq!(store.browse_notes(true, "".into(), 0).unwrap().len(), 1);
+    assert_eq!(
+        store.load_note(first.summary.id).unwrap().document,
+        first.document
+    );
+    store
+        .change_note_lifecycle(first.summary.id, 2, "restore".into())
+        .unwrap();
+    assert!(store.update_note(first.summary.id, 1, input()).is_err());
+    assert!(store.update_note(first.summary.id, 2, input()).is_err());
+    assert_eq!(
+        store.load_note(first.summary.id).unwrap().summary.revision,
+        3
+    );
+    store
+        .change_note_lifecycle(first.summary.id, 3, "trash".into())
+        .unwrap();
+    store
+        .change_note_lifecycle(first.summary.id, 4, "purge".into())
+        .unwrap();
+    assert!(store.load_note(first.summary.id).is_err());
+    assert_eq!(
+        store
+            .load_attachment(second.summary.id, image.id)
+            .unwrap()
+            .bytes,
+        png()
+    );
+    let saved = store
+        .change_note_lifecycle(second.summary.id, 1, "trash".into())
+        .unwrap();
+    assert!(saved.state.unwrap().active_note_id.is_none());
+}
+
+/// Search joins only source text blocks, supports Unicode case folding, and returns bounded pages.
+#[test]
+fn library_search_source_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    let image = store.put_attachment(png()).unwrap();
+    let mut value = with_image(image.id);
+    value.title = "Résumé".into();
+    value.document.blocks[0] = Block::Text {
+        text: "alpha".into(),
+    };
+    value.document.blocks.push(Block::Text {
+        text: "beta".into(),
+    });
+    store.create_note(value).unwrap();
+    assert_eq!(
+        store
+            .browse_notes(false, "ALPHABETA".into(), 0)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store.browse_notes(false, "RÉSUMÉ".into(), 0).unwrap().len(),
+        1
+    );
+    for query in ["caption", "attachmentId", "\u{fffc}"] {
+        assert!(
+            store
+                .browse_notes(false, query.into(), 0)
+                .unwrap()
+                .is_empty()
+        );
+    }
+    assert!(store.browse_notes(false, "x".repeat(1025), 0).is_err());
+    for _ in 0..101 {
+        store.create_note(input()).unwrap();
+    }
+    assert_eq!(store.browse_notes(false, "".into(), 0).unwrap().len(), 100);
+    assert_eq!(store.browse_notes(false, "".into(), 100).unwrap().len(), 2);
+}

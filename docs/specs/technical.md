@@ -112,6 +112,14 @@ Create a consistent SQLite snapshot using its backup facility, not a raw copy of
 
 Manual backup export uses the same snapshot path. Restore validates schema and integrity first, flushes current work, and creates a pre-restore backup. Replace the store only after validation; keep rollback available if replacement or reopening fails. Never merge databases or infer synchronization behavior. Restore replaces local notes and session state after explicit confirmation.
 
+## Note library and Trash
+
+The collapsible sidebar browses live notes or Trash with explicit title/source-text search and 100-result pages. Rust folds Unicode case and joins only text blocks, excluding annotations and internal image markers. Search scans one document at a time without transferring bodies or images to the sidebar; large-library latency is not yet measured.
+
+Before lifecycle changes, the renderer blocks editor input and drains autosave. Native revision-checked Trash/restore increments the note revision, rejecting pending stale edits even after restoration. Trash and permanent deletion remove the note from durable session tabs in the same transaction, selecting a neighboring active tab or an empty state. Autosave adopts the returned session revision and forgets the old note identity. Restored notes load fresh, without stale cached history.
+
+Permanent deletion requires a separate UI confirmation and accepts only trashed notes. Reference rows cascade with the selected note; originals are never eagerly collected, preserving other notes and recovery data. No automatic Trash expiry or schema migration is introduced.
+
 ## Code comments
 
 After completing each feature, function, or cohesive set of working files, review its code comments before moving to the next unit of work. This is part of completion for every implementation ticket.

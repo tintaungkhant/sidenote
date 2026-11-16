@@ -35,6 +35,18 @@ export class Autosave {
     this.notes.set(note.id, { value: { title: note.title, language: note.language, document: note.document }, revision: note.revision, generation: 0, acknowledged: 0 });
   }
 
+  /** After a full flush, expose the acknowledged revision for a lifecycle compare-and-swap. */
+  revision(id: NoteId): number | undefined { return this.notes.get(id)?.revision; }
+
+  /** Adopt an atomic native lifecycle result only after all pending writes have drained. */
+  forget(id: NoteId, saved: SavedSession): void {
+    if (this.pending || this.dirty) throw new Error('Flush autosave before changing note lifecycle');
+    this.notes.delete(id);
+    this.sessionRevision = saved.revision;
+    this.session = saved.state ? { value: saved.state, revision: saved.revision, generation: 0, acknowledged: 0 } : undefined;
+    this.changed();
+  }
+
   /** Stage immutable current content. Annotation completions may request an immediate commit attempt. */
   edit(id: NoteId, value: NoteInput, immediate = false): void {
     const slot = this.notes.get(id);

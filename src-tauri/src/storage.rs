@@ -423,6 +423,103 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// Search source text only, one document at a time; return a bounded page without image payloads.
+    pub fn browse_notes(
+        &self,
+        trash: bool,
+        query: String,
+        offset: u32,
+    ) -> Result<Vec<NoteSummary>> {
+        if query.len() > 1024 {
+            return Err(invalid("Search is limited to 1024 bytes"));
+        }
+        let query = query.to_lowercase();
+        let mut statement = self.connection.prepare("SELECT id,title,language,revision,created_at,updated_at,deleted_at,document FROM notes WHERE (deleted_at IS NOT NULL)=?1 ORDER BY updated_at DESC,id")?;
+        let mut rows = statement.query([trash])?;
+        let mut found = Vec::new();
+        let mut skipped = 0;
+        while let Some(row) = rows.next()? {
+            let summary = summary_row(row)?;
+            let matches = if query.is_empty() || summary.title.to_lowercase().contains(&query) {
+                true
+            } else {
+                let document: Document = serde_json::from_str(&row.get::<_, String>(7)?)
+                    .map_err(|e| StoreError::new("data", e.to_string()))?;
+                let text: String = document
+                    .blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        Block::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                text.to_lowercase().contains(&query)
+            };
+            if matches {
+                if skipped < offset {
+                    skipped += 1;
+                } else {
+                    found.push(summary);
+                }
+                if found.len() == 100 {
+                    break;
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// Revision-checked Trash transitions invalidate old saves; deleting also prunes durable tabs atomically.
+    pub fn change_note_lifecycle(
+        &mut self,
+        id: Uuid,
+        expected_revision: i64,
+        action: String,
+    ) -> Result<SavedSession> {
+        if expected_revision < 1 || expected_revision == i64::MAX {
+            return Err(invalid("Invalid expected revision"));
+        }
+        let mut saved = self.load_session()?;
+        let tx = self.connection.transaction()?;
+        let changed = match action.as_str() {
+            "trash" => tx.execute("UPDATE notes SET deleted_at=?1,updated_at=?1,revision=revision+1 WHERE id=?2 AND revision=?3 AND deleted_at IS NULL", params![now()?,id.to_string(),expected_revision])?,
+            "restore" => tx.execute("UPDATE notes SET deleted_at=NULL,updated_at=?1,revision=revision+1 WHERE id=?2 AND revision=?3 AND deleted_at IS NOT NULL", params![now()?,id.to_string(),expected_revision])?,
+            "purge" => tx.execute("DELETE FROM notes WHERE id=?1 AND revision=?2 AND deleted_at IS NOT NULL", params![id.to_string(),expected_revision])?,
+            _ => return Err(invalid("Unknown Trash action")),
+        };
+        if changed != 1 {
+            return Err(StoreError::new(
+                "conflict",
+                "Note changed; refresh the library before retrying",
+            ));
+        }
+        if action != "restore" {
+            if let Some(state) = &mut saved.state {
+                let index = state
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.note_id == id)
+                    .unwrap_or(0);
+                state.tabs.retain(|tab| tab.note_id != id);
+                if state.active_note_id == Some(id) {
+                    state.active_note_id = state
+                        .tabs
+                        .get(index.min(state.tabs.len().saturating_sub(1)))
+                        .map(|tab| tab.note_id);
+                }
+                let json = serde_json::to_string(state)
+                    .map_err(|e| StoreError::new("data", e.to_string()))?;
+                tx.execute(
+                    "UPDATE session SET state=?1,revision=revision+1 WHERE id=1",
+                    [json],
+                )?;
+                saved.revision += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(saved)
+    }
+
     /// Decode bounded PNG/JPEG input before storing immutable original bytes with native-derived metadata.
     pub fn put_attachment(&mut self, bytes: Vec<u8>) -> Result<AttachmentInfo> {
         if bytes.is_empty() || bytes.len() > MAX_IMAGE {

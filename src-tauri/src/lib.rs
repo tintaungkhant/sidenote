@@ -45,6 +45,8 @@ pub fn run() {
             commands::load_note,
             commands::update_note,
             commands::list_notes,
+            commands::browse_notes,
+            commands::change_note_lifecycle,
             commands::put_attachment,
             commands::load_attachment,
             commands::load_session,

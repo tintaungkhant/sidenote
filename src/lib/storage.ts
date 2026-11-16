@@ -22,6 +22,10 @@ export function loadNote(id: NoteId): Promise<Note> { return invoke('load_note',
 export function updateNote(id: NoteId, expectedRevision: number, input: NoteInput): Promise<Note> { return invoke('update_note', { id, expectedRevision, input }); }
 /** Fetch a bounded metadata page without document JSON or attachment bytes. */
 export function listNotes(limit = 100, offset = 0): Promise<NoteSummary[]> { return invoke('list_notes', { limit, offset }); }
+/** Search only titles and source text, with bounded result pages. */
+export function browseNotes(trash: boolean, query: string, offset = 0): Promise<NoteSummary[]> { return invoke('browse_notes', { trash, query, offset }); }
+/** Atomically change Trash state and remove deleted notes from durable tabs. */
+export function changeNoteLifecycle(id: NoteId, expectedRevision: number, action: 'trash' | 'restore' | 'purge'): Promise<SavedSession> { return invoke('change_note_lifecycle', { id, expectedRevision, action }); }
 /** Store a bounded PNG/JPEG original before referencing its returned ID in a note. */
 export function putAttachment(bytes: Uint8Array): Promise<AttachmentInfo> { return invoke('put_attachment', { bytes: Array.from(bytes) }); }
 /** Read bytes through a note's durable attachment reference, never through filesystem paths. */

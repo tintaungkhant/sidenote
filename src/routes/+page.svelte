@@ -52,6 +52,11 @@
   let language = $state<storage.NoteLanguage>('plaintext');
   let wrap = $state(true);
   let query = $state('');
+  let libraryQuery = $state('');
+  let library = $state.raw<storage.NoteSummary[]>([]);
+  let trash = $state(false);
+  let libraryMore = $state(false);
+  let purge = $state.raw<storage.NoteSummary | undefined>();
   const languageSlot = new Compartment();
   const wrapSlot = new Compartment();
   const editabilitySlot = new Compartment();
@@ -141,6 +146,7 @@
       }
       if (session.activeNoteId) await mountNote(session.activeNoteId);
       stageSession();
+      if (session.sidebarVisible) await browseLibrary();
       refreshStatus();
     } catch (error) {
       startupError = errorMessage(error);
@@ -272,7 +278,44 @@
   }
 
   /** Persist optional sidebar visibility even when every tab is closed. */
-  function toggleSidebar() { session = { ...session, sidebarVisible: !session.sidebarVisible }; stageSession(); }
+  async function toggleSidebar() {
+    session = { ...session, sidebarVisible: !session.sidebarVisible }; stageSession();
+    if (session.sidebarVisible) await browseLibrary();
+  }
+
+  /** Flush current edits before searching so results include the latest source and custom titles. */
+  async function browseLibrary(append = false) {
+    await saver!.flush();
+    const page = await storage.browseNotes(trash, libraryQuery, append ? library.length : 0);
+    library = append ? [...library, ...page] : page;
+    libraryMore = page.length === 100;
+  }
+
+  /** Freeze editor input, drain saves, then apply a revision-checked native Trash transaction. */
+  async function lifecycle(item: storage.NoteSummary, action: 'trash' | 'restore' | 'purge') {
+    view?.contentDOM.blur();
+    view?.dispatch({ effects: editabilitySlot.reconfigure([EditorState.readOnly.of(true), EditorView.editable.of(false)]) });
+    try {
+      stageSession();
+      await saver!.flush();
+      const saved = await storage.changeNoteLifecycle(item.id, saver!.revision(item.id) ?? item.revision, action);
+      if (note?.id === item.id) {
+        view?.scrollDOM.removeEventListener('scroll', stageSession);
+        view?.destroy(); view = undefined; note = undefined;
+      }
+      saver!.forget(item.id, saved);
+      notes.delete(item.id); states.delete(item.id); automatic.delete(item.id);
+      closed = closed.filter(tab => tab.noteId !== item.id);
+      session = saved.state ?? closeTab(session, item.id);
+      if (action !== 'restore') { const next = { ...titles }; delete next[item.id]; titles = next; }
+      else titles = { ...titles, [item.id]: item.title };
+      purge = undefined;
+      if (session.activeNoteId) await mountNote(session.activeNoteId);
+      await browseLibrary();
+    } finally {
+      view?.dispatch({ effects: editabilitySlot.reconfigure([EditorState.readOnly.of(frozen), EditorView.editable.of(!frozen)]) });
+    }
+  }
 
   /** Roving tab focus supports arrows/Home/End without requiring pointer input. */
   function tabKey(event: KeyboardEvent, index: number) {
@@ -329,7 +372,7 @@
       if (action === 'new') await newNote();
       else if (action === 'close' && session.activeNoteId) await closeNote(session.activeNoteId);
       else if (action === 'reopen') await reopenNote();
-      else if (action === 'sidebar') toggleSidebar();
+      else if (action === 'sidebar') await toggleSidebar();
       else if (session.tabs.length) {
         const index = session.tabs.findIndex(tab => tab.noteId === session.activeNoteId);
         await mountNote(session.tabs[(index + (action === 'previous' ? session.tabs.length - 1 : 1)) % session.tabs.length].noteId);
@@ -472,7 +515,7 @@
     <h1 class="mr-auto font-semibold">Simple Note</h1>
     <button type="button" disabled={loading || frozen || busy || !!startupError} onclick={() => runTab(newNote)}>New note</button>
     <button type="button" disabled={loading || frozen || busy || !closed.length} onclick={() => runTab(reopenNote)}>Reopen closed tab</button>
-    <button type="button" aria-pressed={session.sidebarVisible} disabled={loading || frozen || busy} onclick={toggleSidebar}>Sidebar</button>
+    <button type="button" aria-pressed={session.sidebarVisible} disabled={loading || frozen || busy} onclick={() => runTab(toggleSidebar)}>Sidebar</button>
     <fieldset class="contents" disabled={loading || frozen || inserting || busy || !session.activeNoteId || !!startupError} aria-label="Editor tools">
       <label>Language <select class="bg-[#333] px-2 py-1" bind:value={language} onchange={changeLanguage}>
         {#each Object.entries(languageNames) as [value, name]}<option {value}>{name}</option>{/each}
@@ -534,8 +577,31 @@
   </form>
   <div class="flex min-h-0 flex-1">
     {#if session.sidebarVisible}<aside class="w-52 shrink-0 overflow-y-auto border-r border-[var(--border)] bg-[var(--surface)] p-3" aria-label="Notes">
-      <h2 class="mb-2 text-xs uppercase">Notes</h2>
-      {#each Object.entries(titles) as [id, title]}<button type="button" class="block w-full truncate py-1 text-left" disabled={loading || frozen || busy} onclick={() => runTab(() => mountNote(id as storage.NoteId))}>{title}</button>{/each}
+      <fieldset disabled={loading || frozen || busy || !!annotation}>
+        <legend>Note library</legend>
+        <button type="button" aria-pressed={!trash} onclick={() => runTab(async () => { trash = false; await browseLibrary(); })}>All Notes</button>
+        <button type="button" aria-pressed={trash} onclick={() => runTab(async () => { trash = true; await browseLibrary(); })}>Trash</button>
+        <form onsubmit={event => { event.preventDefault(); runTab(() => browseLibrary()); }}>
+          <label>Search titles and text<input class="w-full bg-[#333] px-2" bind:value={libraryQuery} /></label>
+          <button type="submit">Search / Refresh</button>
+        </form>
+        {#each library as item (item.id)}
+          <div class="border-b border-[var(--border)] py-2">
+            {#if trash}
+              <p class="break-words">{item.title}</p>
+              <button type="button" onclick={() => runTab(() => lifecycle(item, 'restore'))}>Restore</button>
+              <button type="button" onclick={() => { purge = item; }}>Delete permanently…</button>
+            {:else}
+              <button type="button" class="block w-full truncate text-left" onclick={() => runTab(() => mountNote(item.id))}>{titles[item.id] ?? item.title}</button>
+              <button type="button" onclick={() => runTab(async () => { await mountNote(item.id); renameValue = note?.title ?? ''; renaming = true; })}>Rename</button>
+              <button type="button" onclick={() => runTab(() => lifecycle(item, 'trash'))}>Move to Trash</button>
+            {/if}
+          </div>
+        {/each}
+        {#if !library.length}<p>Choose All Notes or Trash to load notes. No results? Change the search.</p>{/if}
+        {#if libraryMore}<button type="button" onclick={() => runTab(() => browseLibrary(true))}>Load more</button>{/if}
+        {#if purge}<div role="alert"><p>Permanently delete “{purge.title}”? This cannot be undone.</p><button type="button" onclick={() => runTab(() => lifecycle(purge!, 'purge'))}>Confirm permanent deletion</button><button type="button" onclick={() => { purge = undefined; }}>Cancel</button></div>{/if}
+      </fieldset>
     </aside>{/if}
     <div id="note-panel" role="tabpanel" tabindex="0" aria-label="Active note" class="relative min-h-0 min-w-0 flex-1">
       <div class="h-full" class:hidden={!session.activeNoteId} bind:this={host}></div>

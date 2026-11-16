@@ -44,6 +44,29 @@ pub async fn list_notes(
 ) -> Result<Vec<NoteSummary>, StoreError> {
     access(state, move |s| s.list_notes(limit, offset)).await
 }
+/// Browse live or trashed source without returning document bodies.
+#[tauri::command]
+pub async fn browse_notes(
+    state: State<'_, Storage>,
+    trash: bool,
+    query: String,
+    offset: u32,
+) -> Result<Vec<NoteSummary>, StoreError> {
+    access(state, move |s| s.browse_notes(trash, query, offset)).await
+}
+/// Change deletion state and durable tabs in one transaction.
+#[tauri::command]
+pub async fn change_note_lifecycle(
+    state: State<'_, Storage>,
+    id: Uuid,
+    expected_revision: i64,
+    action: String,
+) -> Result<SavedSession, StoreError> {
+    access(state, move |s| {
+        s.change_note_lifecycle(id, expected_revision, action)
+    })
+    .await
+}
 /// Validate and store one immutable image original; content saves never resend its bytes.
 #[tauri::command]
 pub async fn put_attachment(
