@@ -1,3 +1,4 @@
+mod backup;
 mod clipboard;
 mod commands;
 mod image_output;
@@ -5,7 +6,7 @@ mod lifecycle;
 mod queue;
 mod recovery;
 mod storage;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 /// Acquire the single-instance guard before opening SQLite, then install guarded close and quit paths.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -20,9 +21,13 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .manage(lifecycle::ExitState::default())
+        .manage(backup::RestoreState::default())
         .setup(|app| {
             let directory = app.path().app_data_dir()?;
-            app.manage(queue::Storage::new(storage::Store::open(&directory)?)?);
+            let handle = app.handle().clone();
+            app.manage(queue::Storage::open(directory, move |status| {
+                let _ = handle.emit("backup-status", status);
+            })?);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -41,6 +46,11 @@ pub fn run() {
             clipboard::paste_image,
             image_output::copy_image,
             image_output::export_image,
+            backup::backup_status,
+            backup::export_backup,
+            backup::prepare_restore,
+            backup::cancel_restore,
+            backup::restore_backup,
             commands::create_note,
             commands::load_note,
             commands::update_note,

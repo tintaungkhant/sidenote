@@ -39,6 +39,10 @@
   let insertion: Promise<void> | undefined;
   let recovery: Promise<void> | undefined;
   let imageOutput: Promise<string> | undefined;
+  let backupWork: Promise<void> | undefined;
+  let backupPending = $state(false);
+  let backupStatus = $state.raw<storage.BackupStatus>({ directory: '', lastBackup: null, error: null });
+  let restorePreview = $state.raw<storage.RestorePreview | null>(null);
   let disposed = false;
   let loading = $state(true);
   let frozen = $state(false);
@@ -72,7 +76,7 @@
   const exit = new ExitGuard({
     freeze: setFrozen,
     /** Await startup, image insertion/output, recovery, and tab transitions before taking the final close snapshot. */
-    prepare: async () => { await bootstrap.catch(() => {}); await insertion; await recovery; await imageOutput?.catch(() => {}); await transition; stageSession(); },
+    prepare: async () => { await bootstrap.catch(() => {}); await insertion; await recovery; await imageOutput?.catch(() => {}); await backupWork; await transition; stageSession(); },
     flush: async () => {
       if (!saver) throw new Error(startupError || 'Storage has not finished loading');
       await saver.flush();
@@ -331,9 +335,13 @@
   /** Subscribe before loading so startup close requests are retained by the native handshake. */
   onMount(() => {
     let unlisten: (() => void) | undefined;
+    let unlistenBackup: (() => void) | undefined;
     bootstrap = (async () => {
       unlisten = await listen('flush-before-exit', () => { void exit.request(); });
       if (disposed) { unlisten(); return; }
+      unlistenBackup = await listen<storage.BackupStatus>('backup-status', event => { backupStatus = event.payload; });
+      if (disposed) { unlistenBackup(); return; }
+      backupStatus = await storage.backupStatus();
       if (await storage.exitReady()) void exit.request();
       await loadWorkspace();
     })();
@@ -344,6 +352,7 @@
       disposed = true;
       saver?.stop();
       unlisten?.();
+      unlistenBackup?.();
       window.removeEventListener('keydown', quitShortcut);
       view?.scrollDOM.removeEventListener('scroll', stageSession);
       view?.destroy(); view = undefined;
@@ -506,6 +515,61 @@
         : 'Recovery exported. Unsaved changes are still open.';
     } catch (error) { notice = errorMessage(error); }
   }
+
+  /** Track native backup work in the exit barrier while leaving typing available during snapshot creation. */
+  function runBackup(action: () => Promise<void>) {
+    if (backupPending || frozen || loading || recovery || annotation) return;
+    backupPending = true;
+    backupWork = Promise.resolve().then(action).catch(error => { notice = errorMessage(error); }).finally(() => {
+      backupPending = false; backupWork = undefined;
+    });
+  }
+
+  /** Flush existing generations before opening the export picker; SQLite snapshots stay consistent during further typing. */
+  function exportWorkspaceBackup() {
+    runBackup(async () => {
+      if (!saver) throw new Error('Load the workspace before exporting a backup');
+      await saver.flush();
+      notice = await storage.exportBackup() ? 'Workspace backup exported.' : 'Backup export cancelled.';
+    });
+  }
+
+  /** A privately staged backup remains unchanged while the user reads the replacement warning and continues editing. */
+  function selectWorkspaceBackup() {
+    runBackup(async () => {
+      restorePreview = null;
+      restorePreview = await storage.prepareRestore();
+      if (!restorePreview) notice = 'Backup selection cancelled.';
+    });
+  }
+
+  /** Discard native candidate resources as well as hiding the confirmation. */
+  function cancelWorkspaceRestore() {
+    runBackup(async () => { await storage.cancelRestore(); restorePreview = null; });
+  }
+
+  /** Replace only after all in-flight editor operations and dirty generations settle; failure keeps current caches intact. */
+  function confirmWorkspaceRestore() {
+    if (!restorePreview) return;
+    const token = restorePreview.token;
+    runBackup(async () => {
+      setFrozen(true);
+      try {
+        await insertion; await imageOutput?.catch(() => {}); await transition;
+        if (saver) { stageSession(); await saver.flush(); }
+        try { await storage.restoreBackup(token); }
+        finally { restorePreview = null; }
+        // Every cached revision, undo state, and original belongs to the replaced workspace and must be released.
+        saver?.stop(); saver = undefined;
+        view?.scrollDOM.removeEventListener('scroll', stageSession);
+        view?.destroy(); view = undefined; note = undefined;
+        notes.clear(); states.clear(); automatic.clear(); sources.clear();
+        titles = {}; library = []; closed = []; session = emptySession(); purge = undefined; renaming = false;
+        await loadWorkspace();
+        notice = 'Workspace restored. A pre-restore copy remains in the backup directory.';
+      } finally { if (!exit.busy) setFrozen(false); }
+    });
+  }
 </script>
 
 <svelte:head><title>Simple Note</title></svelte:head>
@@ -529,10 +593,29 @@
     </fieldset>
     <button type="button" disabled={frozen} onclick={() => storage.requestExit().catch(error => { saveError = errorMessage(error); })}>Quit</button>
   </header>
+  <details class="border-b border-[var(--border)] px-4 py-2">
+    <summary>Backup and restore</summary>
+    <p>Local SQLite backups include all notes, Trash, images, annotations, and tabs.</p>
+    <p class="break-all">Automatic backups: {backupStatus.directory || 'Loading backup location…'}</p>
+    {#if backupStatus.lastBackup}<p class="break-all">Latest automatic snapshot: {backupStatus.lastBackup}</p>{/if}
+    <button type="button" disabled={loading || frozen || backupPending || !!startupError} onclick={exportWorkspaceBackup}>Export workspace backup</button>
+    <button type="button" disabled={loading || frozen || backupPending} onclick={selectWorkspaceBackup}>Select backup to restore…</button>
+    {#if backupPending}<p role="status">Working on backup or restore…</p>{/if}
+    {#if restorePreview}
+      <div role="alert" class="my-2 border border-[#a66] p-2">
+        <p>Replace all local notes, Trash, images, and tabs with this backup ({restorePreview.notes} notes, {restorePreview.trashed} in Trash)? This does not merge workspaces.</p>
+        <p>Current edits will be saved first. A pre-restore backup is kept. If the current store is unreadable, its original database files are preserved instead.</p>
+        <button type="button" disabled={loading || frozen || backupPending} onclick={confirmWorkspaceRestore}>Confirm replacement and restore</button>
+        <button type="button" disabled={frozen || backupPending} onclick={cancelWorkspaceRestore}>Cancel restore</button>
+      </div>
+    {/if}
+  </details>
+  {#if backupStatus.error}<div role="alert" class="bg-[#522] px-4 py-2">Automatic backup failed: {backupStatus.error}. Acknowledged saves remain intact. The next successful write retries the backup.</div>{/if}
   {#if startupError}
     <div class="flex flex-wrap gap-3 bg-[#522] px-4 py-2" role="alert">
       <span>Could not load notes: {startupError}</span>
       <button type="button" disabled={loading || frozen} onclick={retryStartup}>Retry loading</button>
+      <button type="button" disabled={loading || frozen || backupPending} onclick={selectWorkspaceBackup}>Recover from a backup…</button>
       <button type="button" disabled={loading || frozen} onclick={() => { confirmDiscard = true; }}>Quit without changes</button>
     </div>
   {/if}

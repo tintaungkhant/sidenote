@@ -13,7 +13,7 @@ const MAX_DOCUMENT: usize = 8 * 1024 * 1024;
 const MAX_IMAGE: usize = 20 * 1024 * 1024;
 const MAX_PIXELS: u64 = 40_000_000;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoreError {
     pub code: &'static str,
@@ -235,8 +235,14 @@ fn validate_annotation(annotation: &Annotation, width: u32, height: u32) -> Resu
 
 pub struct Store {
     connection: Connection,
+    directory: std::path::PathBuf,
 }
 impl Store {
+    /// Identify the owned database directory for native queue/test orchestration only.
+    #[cfg(test)]
+    pub(crate) fn database_directory(&self) -> &Path {
+        &self.directory
+    }
     /// Open only an app-owned directory. Initialization is transactional and never resets existing data.
     pub fn open(directory: &Path) -> Result<Self> {
         std::fs::create_dir_all(directory)
@@ -274,7 +280,10 @@ impl Store {
         transaction.commit()?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            directory: directory.to_owned(),
+        })
     }
 
     /// Validate the full document and resolve every image reference without loading its bytes.
@@ -522,30 +531,7 @@ impl Store {
 
     /// Decode bounded PNG/JPEG input before storing immutable original bytes with native-derived metadata.
     pub fn put_attachment(&mut self, bytes: Vec<u8>) -> Result<AttachmentInfo> {
-        if bytes.is_empty() || bytes.len() > MAX_IMAGE {
-            return Err(invalid("Image must be between 1 byte and 20 MiB"));
-        }
-        let format =
-            image::guess_format(&bytes).map_err(|_| invalid("Unrecognized raster image"))?;
-        let mime_type = match format {
-            image::ImageFormat::Png => "image/png",
-            image::ImageFormat::Jpeg => "image/jpeg",
-            _ => return Err(invalid("Only PNG and JPEG originals are supported")),
-        };
-        let mut reader = image::ImageReader::with_format(Cursor::new(&bytes), format);
-        let mut limits = image::Limits::default();
-        limits.max_alloc = Some(256 * 1024 * 1024);
-        reader.limits(limits);
-        let (width, height) = image::ImageReader::with_format(Cursor::new(&bytes), format)
-            .into_dimensions()
-            .map_err(|_| invalid("Invalid image dimensions"))?;
-        if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_PIXELS {
-            return Err(invalid("Image exceeds 40 megapixels"));
-        }
-        // Force decoding here so truncated or malformed originals never become durable attachments.
-        reader
-            .decode()
-            .map_err(|_| invalid("Image could not be decoded within memory limits"))?;
+        let (mime_type, width, height) = validate_image(&bytes)?;
         let id = Uuid::new_v4();
         self.connection.execute(
             "INSERT INTO attachments VALUES (?1,?2,?3,?4,?5,?6)",
@@ -611,34 +597,7 @@ impl Store {
 
     /// Persist bounded session state with optimistic concurrency, including on the initial insert.
     pub fn save_session(&mut self, expected_revision: i64, state: Session) -> Result<SavedSession> {
-        if expected_revision < 0
-            || expected_revision == i64::MAX
-            || state.version != 1
-            || state.tabs.len() > 1000
-        {
-            return Err(invalid("Invalid session revision, version, or tab count"));
-        }
-        let mut ids = HashSet::new();
-        let mut unpinned = false;
-        for tab in &state.tabs {
-            if tab.note_id.is_nil()
-                || !ids.insert(tab.note_id)
-                || !tab.scroll_top.is_finite()
-                || tab.scroll_top < 0.0
-                || tab.scroll_top > 1e12
-                || (unpinned && tab.pinned)
-            {
-                return Err(invalid("Invalid tab state, duplicate tab, or pinned order"));
-            }
-            unpinned |= !tab.pinned;
-        }
-        if state.active_note_id.is_some_and(|id| !ids.contains(&id)) {
-            return Err(invalid("Active note must be an open tab"));
-        }
-        let json = serde_json::to_string(&state).map_err(|e| invalid(&e.to_string()))?;
-        if json.len() > 1024 * 1024 {
-            return Err(invalid("Session exceeds 1 MiB"));
-        }
+        let json = validate_session(expected_revision, &state)?;
         let tx = self
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -679,3 +638,67 @@ fn summary_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<NoteSummary> {
 
 #[cfg(test)]
 mod tests;
+
+/// Validate raster payloads identically at import and backup restore boundaries.
+fn validate_image(bytes: &[u8]) -> Result<(&'static str, u32, u32)> {
+    if bytes.is_empty() || bytes.len() > MAX_IMAGE {
+        return Err(invalid("Image must be between 1 byte and 20 MiB"));
+    }
+    let format = image::guess_format(&bytes).map_err(|_| invalid("Unrecognized raster image"))?;
+    let mime_type = match format {
+        image::ImageFormat::Png => "image/png",
+        image::ImageFormat::Jpeg => "image/jpeg",
+        _ => return Err(invalid("Only PNG and JPEG originals are supported")),
+    };
+    let mut reader = image::ImageReader::with_format(Cursor::new(&bytes), format);
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    reader.limits(limits);
+    let (width, height) = image::ImageReader::with_format(Cursor::new(&bytes), format)
+        .into_dimensions()
+        .map_err(|_| invalid("Invalid image dimensions"))?;
+    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_PIXELS {
+        return Err(invalid("Image exceeds 40 megapixels"));
+    }
+    // Force decoding here so truncated or malformed originals never become durable attachments.
+    reader
+        .decode()
+        .map_err(|_| invalid("Image could not be decoded within memory limits"))?;
+    Ok((mime_type, width, height))
+}
+
+/// Validate session bounds and tab invariants without mutating a candidate backup.
+fn validate_session(expected_revision: i64, state: &Session) -> Result<String> {
+    if expected_revision < 0
+        || expected_revision == i64::MAX
+        || state.version != 1
+        || state.tabs.len() > 1000
+    {
+        return Err(invalid("Invalid session revision, version, or tab count"));
+    }
+    let mut ids = HashSet::new();
+    let mut unpinned = false;
+    for tab in &state.tabs {
+        if tab.note_id.is_nil()
+            || !ids.insert(tab.note_id)
+            || !tab.scroll_top.is_finite()
+            || tab.scroll_top < 0.0
+            || tab.scroll_top > 1e12
+            || (unpinned && tab.pinned)
+        {
+            return Err(invalid("Invalid tab state, duplicate tab, or pinned order"));
+        }
+        unpinned |= !tab.pinned;
+    }
+    if state.active_note_id.is_some_and(|id| !ids.contains(&id)) {
+        return Err(invalid("Active note must be an open tab"));
+    }
+    let json = serde_json::to_string(&state).map_err(|e| invalid(&e.to_string()))?;
+    if json.len() > 1024 * 1024 {
+        return Err(invalid("Session exceeds 1 MiB"));
+    }
+    Ok(json)
+}
+
+pub(crate) mod backup;
+pub use backup::{BackupStatus, PreparedRestore};

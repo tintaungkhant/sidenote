@@ -4,7 +4,7 @@ import type { AttachmentId, NoteDocument } from './editor/document';
 
 export type NoteId = string & { readonly noteId: unique symbol };
 export type NoteLanguage = 'plaintext' | 'markdown' | 'javascript' | 'typescript' | 'json' | 'html';
-export type StoreError = { code: 'validation' | 'database' | 'filesystem' | 'schema' | 'data' | 'clock' | 'not_found' | 'missing_attachment' | 'conflict' | 'unavailable' | 'recovery' | 'image_output'; message: string };
+export type StoreError = { code: 'validation' | 'database' | 'filesystem' | 'schema' | 'data' | 'clock' | 'not_found' | 'missing_attachment' | 'conflict' | 'unavailable' | 'recovery' | 'image_output' | 'backup'; message: string };
 export type NoteInput = { title: string; document: NoteDocument; language: NoteLanguage };
 export type NoteSummary = { id: NoteId; title: string; language: NoteLanguage; revision: number; createdAt: number; updatedAt: number; deletedAt: number | null };
 export type Note = NoteSummary & { document: NoteDocument };
@@ -13,6 +13,19 @@ export type Attachment = AttachmentInfo & { bytes: number[] };
 export type SessionTab = { noteId: NoteId; pinned: boolean; anchor: number; head: number; scrollTop: number };
 export type Session = { version: 1; tabs: SessionTab[]; activeNoteId: NoteId | null; sidebarVisible: boolean; wordWrap: boolean };
 export type SavedSession = { revision: number; state: Session | null };
+export type BackupStatus = { directory: string; lastBackup: string | null; error: string | null };
+export type RestorePreview = { token: string; notes: number; trashed: number };
+
+/** Observe automatic backup warnings independently from note-save acknowledgements. */
+export function backupStatus(): Promise<BackupStatus> { return invoke('backup_status'); }
+/** Export a consistent SQLite snapshot via the native picker; false means cancellation. */
+export function exportBackup(): Promise<boolean> { return invoke('export_backup'); }
+/** Select, privately stage, and validate a backup before asking for destructive confirmation. */
+export function prepareRestore(): Promise<RestorePreview | null> { return invoke('prepare_restore'); }
+/** Release selected backup bytes immediately when confirmation is cancelled. */
+export function cancelRestore(): Promise<void> { return invoke('cancel_restore'); }
+/** Consume a native one-use candidate token after flushing and freezing renderer edits. */
+export function restoreBackup(token: string): Promise<void> { return invoke('restore_backup', { token }); }
 
 /** Create a revision-one note; rejects invalid documents or missing image originals. */
 export function createNote(input: NoteInput): Promise<Note> { return invoke('create_note', { input }); }
