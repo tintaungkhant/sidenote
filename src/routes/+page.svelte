@@ -1,6 +1,6 @@
 <script lang="ts">
   import '../app.css';
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { Compartment, EditorState } from '@codemirror/state';
   import { EditorView, drawSelection, highlightActiveLine, keymap, lineNumbers, type Command } from '@codemirror/view';
   import { defaultKeymap, historyKeymap, indentWithTab, undo, redo, moveLineUp, moveLineDown, copyLineUp, copyLineDown, transposeChars } from '@codemirror/commands';
@@ -56,6 +56,81 @@
   let language = $state<storage.NoteLanguage>('plaintext');
   let wrap = $state(true);
   let query = $state('');
+  let findVisible = $state(false);
+  let backupDialog: HTMLDialogElement;
+  let tabMenu: HTMLDivElement;
+  let libraryMenu: HTMLDivElement;
+  let libraryTarget = $state.raw<storage.NoteSummary | undefined>();
+  let menuNote = $state<storage.NoteId | undefined>();
+  let menuX = $state(0);
+  let menuY = $state(0);
+
+  /** Mount the compact find bar before focusing it; closing retains the query for the next search. */
+  async function openFind() {
+    findVisible = true;
+    await tick();
+    document.getElementById('find')?.focus();
+  }
+
+  /** Native modal focus containment and restoration keep backup controls out of the editing workspace. */
+  function openBackups() { backupDialog.showModal(); }
+
+  /** Native popover dismissal supports pointer, Escape, and keyboard-triggered tab context menus. */
+  function openTabMenu(event: MouseEvent, id: storage.NoteId) {
+    event.preventDefault();
+    menuNote = id;
+    showContextMenu(event, tabMenu);
+  }
+
+  /** Position either native context popover at the pointer or its keyboard-focused row. */
+  async function showContextMenu(event: MouseEvent | KeyboardEvent, menu: HTMLElement) {
+    const rect = event.currentTarget instanceof HTMLElement ? event.currentTarget.getBoundingClientRect() : undefined;
+    menuX = Math.max(8, Math.min(('clientX' in event && event.clientX) || rect?.left || 8, window.innerWidth - 232));
+    menuY = Math.max(8, Math.min(('clientY' in event && event.clientY) || rect?.bottom || 48, window.innerHeight - 250));
+    await tick();
+    menu.showPopover();
+    menu.querySelector<HTMLButtonElement>('button')?.focus();
+  }
+
+  /** Keep the selected summary independent of the active editor; right-click never switches notes. */
+  function openLibraryMenu(event: MouseEvent | KeyboardEvent, item: storage.NoteSummary) {
+    event.preventDefault();
+    if (loading || frozen || busy || inserting || annotation) return;
+    libraryTarget = item;
+    showContextMenu(event, libraryMenu);
+  }
+
+  /** Route row actions through existing rename and revision-checked lifecycle operations. */
+  function libraryAction(action: 'rename' | 'trash' | 'restore' | 'purge') {
+    const item = libraryTarget;
+    libraryMenu.hidePopover();
+    if (!item || loading || frozen || busy || inserting || annotation) return;
+    if (action === 'rename') renameTab(item.id);
+    else if (action === 'purge') purge = item;
+    else runTab(() => lifecycle(item, action));
+  }
+
+  /** Reuse serialized tab operations so menu actions preserve autosave and editor identity. */
+  function tabAction(action: 'rename' | 'pin' | 'left' | 'right' | 'close') {
+    const id = menuNote;
+    tabMenu.hidePopover();
+    if (!id) return;
+    if (action === 'rename') { renameTab(id); return; }
+    runTab(async () => {
+      if (action === 'close') await closeNote(id);
+      else alterTab(id, action === 'pin' ? 'pin' : action === 'left' ? -1 : 1);
+    });
+  }
+
+  /** Both sidebar and tab menus focus the title only after the serialized transition enables its input. */
+  function renameTab(id: storage.NoteId) {
+    runTab(async () => { await mountNote(id); renameValue = note?.title ?? ''; renaming = true; });
+    void transition.then(async () => {
+      await tick();
+      if (renaming) document.getElementById('note-title')?.focus();
+    });
+  }
+
   let libraryQuery = $state('');
   let library = $state.raw<storage.NoteSummary[]>([]);
   let trash = $state(false);
@@ -203,7 +278,7 @@
         }, openAnnotation),
         EditorView.contentAttributes.of({ 'aria-label': 'Note editor' }),
         EditorView.domEventHandlers({ paste(event) { return pasteScreenshot(event); } }),
-        keymap.of([{ key: 'Mod-f', run: () => { document.getElementById('find')?.focus(); return true; } }, indentWithTab, ...editingKeys, ...historyKeymap]),
+        keymap.of([{ key: 'Mod-f', run: () => { void openFind(); return true; } }, indentWithTab, ...editingKeys, ...historyKeymap]),
         languageSlot.of(languageExtension()), wrapSlot.of(wrap ? EditorView.lineWrapping : []),
         editabilitySlot.of([EditorState.readOnly.of(frozen), EditorView.editable.of(!frozen)]),
         EditorView.updateListener.of(update => {
@@ -372,7 +447,7 @@
 
   /** App shortcuts leave OS-reserved combinations and IME input untouched. */
   function quitShortcut(event: KeyboardEvent) {
-    if (annotation) return;
+    if (annotation || backupDialog?.open) return;
     const action = tabShortcut(event);
     if (!action) return;
     event.preventDefault();
@@ -575,26 +650,30 @@
 <svelte:head><title>Simple Note</title></svelte:head>
 
 <main class="flex h-dvh flex-col bg-[#1e1e1e] text-sm text-[#d4d4d4]" aria-busy={loading || frozen}>
-  <header class="flex flex-wrap items-center gap-3 border-b border-[#333] bg-[#252526] px-4 py-2">
-    <h1 class="mr-auto font-semibold">Simple Note</h1>
-    <button type="button" disabled={loading || frozen || busy || !!startupError} onclick={() => runTab(newNote)}>New note</button>
-    <button type="button" disabled={loading || frozen || busy || !closed.length} onclick={() => runTab(reopenNote)}>Reopen closed tab</button>
-    <button type="button" aria-pressed={session.sidebarVisible} disabled={loading || frozen || busy} onclick={() => runTab(toggleSidebar)}>Sidebar</button>
-    <fieldset class="contents" disabled={loading || frozen || inserting || busy || !session.activeNoteId || !!startupError} aria-label="Editor tools">
-      <label>Language <select class="bg-[#333] px-2 py-1" bind:value={language} onchange={changeLanguage}>
-        {#each Object.entries(languageNames) as [value, name]}<option {value}>{name}</option>{/each}
-      </select></label>
-      <button type="button" aria-pressed={wrap} onclick={toggleWrap}>Wrap: {wrap ? 'On' : 'Off'}</button>
-      <button type="button" onclick={() => view && undo(view)}>Undo</button>
-      <button type="button" onclick={() => view && redo(view)}>Redo</button>
-      <button type="button" disabled={inserting} onclick={() => pasteScreenshot()}>{inserting ? 'Adding image…' : 'Paste screenshot'}</button>
-      <button type="button" onclick={() => moveSelection(-1)}>Move selection left</button>
-      <button type="button" onclick={() => moveSelection(1)}>Move selection right</button>
-    </fieldset>
-    <button type="button" disabled={frozen} onclick={() => storage.requestExit().catch(error => { saveError = errorMessage(error); })}>Quit</button>
+  <!-- Primary actions stay visible; infrequent commands use the native light-dismiss popover. -->
+  <header class="app-header">
+    <button class="icon-button" type="button" aria-label="Toggle note sidebar" title="Toggle sidebar (Ctrl/Cmd+B)" aria-pressed={session.sidebarVisible} disabled={loading || frozen || busy} onclick={() => runTab(toggleSidebar)}>☰</button>
+    <h1>Simple Note</h1>
+    <div class="header-actions">
+      <button class="primary-button" type="button" disabled={loading || frozen || busy || !!startupError} onclick={() => runTab(newNote)}>＋ New note</button>
+      <button type="button" disabled={loading || frozen || inserting || busy || !session.activeNoteId || !!startupError} onclick={() => pasteScreenshot()}>{inserting ? 'Adding image…' : 'Paste screenshot'}</button>
+      <button class="icon-button" type="button" aria-label="More actions" title="More actions" popovertarget="app-menu">···</button>
+    </div>
+    <div id="app-menu" popover class="command-menu app-menu">
+      <button type="button" disabled={loading || frozen || busy || !closed.length} onclick={() => { document.getElementById('app-menu')?.hidePopover(); runTab(reopenNote); }}>Reopen closed tab <kbd>⇧⌘/Ctrl T</kbd></button>
+      <fieldset disabled={loading || frozen || inserting || busy || !session.activeNoteId || !!startupError} aria-label="Editor commands">
+        <button type="button" onclick={() => { document.getElementById('app-menu')?.hidePopover(); void openFind(); }}>Find in note <kbd>⌘/Ctrl F</kbd></button>
+        <button type="button" onclick={() => view && undo(view)}>Undo</button>
+        <button type="button" onclick={() => view && redo(view)}>Redo</button>
+        <button type="button" onclick={() => moveSelection(-1)}>Move selection left</button>
+        <button type="button" onclick={() => moveSelection(1)}>Move selection right</button>
+      </fieldset>
+      <button type="button" onclick={() => { document.getElementById('app-menu')?.hidePopover(); openBackups(); }}>Backup and restore…</button>
+      <button type="button" disabled={frozen} onclick={() => storage.requestExit().catch(error => { saveError = errorMessage(error); })}>Quit</button>
+    </div>
   </header>
-  <details class="border-b border-[var(--border)] px-4 py-2">
-    <summary>Backup and restore</summary>
+  <dialog bind:this={backupDialog} class="settings-dialog" aria-labelledby="backup-heading" oncancel={event => { if (backupPending || restorePreview) event.preventDefault(); }}>
+    <div class="dialog-heading"><h2 id="backup-heading">Backup and restore</h2><button type="button" aria-label="Close backup settings" disabled={backupPending || !!restorePreview} onclick={() => backupDialog.close()}>×</button></div>
     <p>Local SQLite backups include all notes, Trash, images, annotations, and tabs.</p>
     <p class="break-all">Automatic backups: {backupStatus.directory || 'Loading backup location…'}</p>
     {#if backupStatus.lastBackup}<p class="break-all">Latest automatic snapshot: {backupStatus.lastBackup}</p>{/if}
@@ -609,13 +688,16 @@
         <button type="button" disabled={frozen || backupPending} onclick={cancelWorkspaceRestore}>Cancel restore</button>
       </div>
     {/if}
-  </details>
+
+    {#if notice}<p role="status">{notice}</p>{/if}
+    <div class="dialog-actions"><button type="button" disabled={backupPending || !!restorePreview} onclick={() => backupDialog.close()}>Done</button></div>
+  </dialog>
   {#if backupStatus.error}<div role="alert" class="bg-[#522] px-4 py-2">Automatic backup failed: {backupStatus.error}. Acknowledged saves remain intact. The next successful write retries the backup.</div>{/if}
   {#if startupError}
     <div class="flex flex-wrap gap-3 bg-[#522] px-4 py-2" role="alert">
       <span>Could not load notes: {startupError}</span>
       <button type="button" disabled={loading || frozen} onclick={retryStartup}>Retry loading</button>
-      <button type="button" disabled={loading || frozen || backupPending} onclick={selectWorkspaceBackup}>Recover from a backup…</button>
+      <button type="button" disabled={loading || frozen || backupPending} onclick={() => { openBackups(); selectWorkspaceBackup(); }}>Recover from a backup…</button>
       <button type="button" disabled={loading || frozen} onclick={() => { confirmDiscard = true; }}>Quit without changes</button>
     </div>
   {/if}
@@ -634,66 +716,86 @@
       <button type="button" disabled={frozen} onclick={() => { confirmDiscard = false; }}>Keep editing</button>
     </div>
   {/if}
-  <div class="flex overflow-x-auto border-b border-[var(--border)] bg-[var(--surface)]" role="tablist" aria-label="Open notes">
-    {#each session.tabs as tab, index (tab.noteId)}
-      <div class="flex shrink-0 items-center border-r border-[var(--border)]">
-        <button id={`tab-${tab.noteId}`} type="button" role="tab" aria-selected={session.activeNoteId === tab.noteId} aria-controls="note-panel"
-          tabindex={session.activeNoteId === tab.noteId ? 0 : -1} disabled={frozen || busy || loading}
-          class="max-w-48 truncate px-3 py-2 aria-selected:bg-[var(--editor)] aria-selected:text-white"
-          onkeydown={event => tabKey(event, index)} onclick={() => runTab(() => mountNote(tab.noteId))}>{tab.pinned ? '◆ ' : ''}{titles[tab.noteId] ?? 'Untitled'}</button>
-        <button type="button" class="px-1" aria-label={`Close ${titles[tab.noteId]}`} disabled={frozen || busy || loading} onclick={() => runTab(() => closeNote(tab.noteId))}>×</button>
-      </div>
-    {/each}
-  </div>
-  {#if session.activeNoteId}
-    <div class="flex flex-wrap items-center gap-3 px-4 py-1">
-      <button type="button" disabled={frozen || busy} onclick={() => { renameValue = note?.title ?? ''; renaming = true; }}>Rename</button>
-      <button type="button" disabled={frozen || busy} aria-pressed={session.tabs.find(tab => tab.noteId === session.activeNoteId)?.pinned ?? false} onclick={() => alterTab(session.activeNoteId!, 'pin')}>Pin tab</button>
-      <button type="button" disabled={frozen || busy} onclick={() => alterTab(session.activeNoteId!, -1)}>Move tab left</button>
-      <button type="button" disabled={frozen || busy} onclick={() => alterTab(session.activeNoteId!, 1)}>Move tab right</button>
-      {#if renaming}<form onsubmit={renameNote}><label>Note title <input class="bg-[#333] px-2" bind:value={renameValue} disabled={frozen || busy} /></label><button type="submit" disabled={frozen || busy}>Apply title</button><button type="button" onclick={() => { renaming = false; }}>Cancel</button></form>{/if}
-    </div>
-  {/if}
-  <form class="flex items-center gap-3 border-b border-[#333] px-4 py-2" onsubmit={find}>
-    <label for="find">Find</label><input id="find" class="min-w-0 flex-1 bg-[#333] px-2 py-1" bind:value={query} disabled={loading || frozen || inserting || busy || !session.activeNoteId || !!startupError} />
-    <button type="submit" disabled={loading || frozen || inserting || busy || !session.activeNoteId || !!startupError}>Find next</button>
-  </form>
-  <div class="flex min-h-0 flex-1">
-    {#if session.sidebarVisible}<aside class="w-52 shrink-0 overflow-y-auto border-r border-[var(--border)] bg-[var(--surface)] p-3" aria-label="Notes">
+  <!-- Explorer spans the workspace height; tabs and search belong only to the editor column. -->
+  <div class="workspace">
+    {#if session.sidebarVisible}<aside class="note-sidebar" aria-label="Notes">
       <fieldset disabled={loading || frozen || busy || !!annotation}>
-        <legend>Note library</legend>
+        <legend>EXPLORER</legend>
+        <div class="library-switch">
         <button type="button" aria-pressed={!trash} onclick={() => runTab(async () => { trash = false; await browseLibrary(); })}>All Notes</button>
-        <button type="button" aria-pressed={trash} onclick={() => runTab(async () => { trash = true; await browseLibrary(); })}>Trash</button>
-        <form onsubmit={event => { event.preventDefault(); runTab(() => browseLibrary()); }}>
-          <label>Search titles and text<input class="w-full bg-[#333] px-2" bind:value={libraryQuery} /></label>
-          <button type="submit">Search / Refresh</button>
+        <button type="button" aria-pressed={trash} onclick={() => runTab(async () => { trash = true; await browseLibrary(); })}>Trash</button></div>
+        <form class="library-search" onsubmit={event => { event.preventDefault(); runTab(() => browseLibrary()); }}>
+          <label class="sr-only" for="library-search">Search titles and text</label><input id="library-search" placeholder="Search notes…" bind:value={libraryQuery} />
+          <button type="submit" aria-label="Search or refresh notes" title="Search or refresh">↵</button>
         </form>
         {#each library as item (item.id)}
-          <div class="border-b border-[var(--border)] py-2">
-            {#if trash}
-              <p class="break-words">{item.title}</p>
-              <button type="button" onclick={() => runTab(() => lifecycle(item, 'restore'))}>Restore</button>
-              <button type="button" onclick={() => { purge = item; }}>Delete permanently…</button>
-            {:else}
-              <button type="button" class="block w-full truncate text-left" onclick={() => runTab(() => mountNote(item.id))}>{titles[item.id] ?? item.title}</button>
-              <button type="button" onclick={() => runTab(async () => { await mountNote(item.id); renameValue = note?.title ?? ''; renaming = true; })}>Rename</button>
-              <button type="button" onclick={() => runTab(() => lifecycle(item, 'trash'))}>Move to Trash</button>
-            {/if}
-          </div>
+          <button type="button" class="library-row" class:current={!trash && session.activeNoteId === item.id}
+            title={titles[item.id] ?? item.title} aria-haspopup="true"
+            oncontextmenu={event => openLibraryMenu(event, item)}
+            onkeydown={event => { if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) openLibraryMenu(event, item); }}
+            onclick={event => { if (trash) openLibraryMenu(event, item); else runTab(() => mountNote(item.id)); }}>
+            <span class="file-symbol" aria-hidden="true">▤</span><span class="file-name">{titles[item.id] ?? item.title}</span>
+          </button>
         {/each}
-        {#if !library.length}<p>Choose All Notes or Trash to load notes. No results? Change the search.</p>{/if}
+        {#if !library.length}<p class="empty-library">{trash ? 'Trash is empty.' : 'No notes found. Try another search or create a note.'}</p>{/if}
         {#if libraryMore}<button type="button" onclick={() => runTab(() => browseLibrary(true))}>Load more</button>{/if}
         {#if purge}<div role="alert"><p>Permanently delete “{purge.title}”? This cannot be undone.</p><button type="button" onclick={() => runTab(() => lifecycle(purge!, 'purge'))}>Confirm permanent deletion</button><button type="button" onclick={() => { purge = undefined; }}>Cancel</button></div>{/if}
       </fieldset>
     </aside>{/if}
-    <div id="note-panel" role="tabpanel" tabindex="0" aria-label="Active note" class="relative min-h-0 min-w-0 flex-1">
-      <div class="h-full" class:hidden={!session.activeNoteId} bind:this={host}></div>
-      {#if !loading && !startupError && !session.activeNoteId}<div class="flex h-full flex-col items-center justify-center gap-3"><p>All tabs closed. Your notes are preserved.</p><button type="button" disabled={frozen || busy} onclick={() => runTab(newNote)}>Create a note</button><p class="text-xs">Open a note from the sidebar or reopen the last closed tab.</p></div>{/if}
+    <div class="editor-column">
+      <!-- One editor remains mounted; tab menus only change existing serialized operations. -->
+      <div class="tab-strip" role="tablist" aria-label="Open notes">
+        {#each session.tabs as tab, index (tab.noteId)}
+          <div class="note-tab" class:active={session.activeNoteId === tab.noteId}>
+            <button id={`tab-${tab.noteId}`} type="button" role="tab" aria-selected={session.activeNoteId === tab.noteId} aria-controls="note-panel"
+              tabindex={session.activeNoteId === tab.noteId ? 0 : -1} disabled={frozen || busy || loading}
+              class="tab-label" oncontextmenu={event => openTabMenu(event, tab.noteId)}
+              onkeydown={event => tabKey(event, index)} onclick={() => runTab(() => mountNote(tab.noteId))}><span class="tab-symbol" aria-label={tab.pinned ? 'Pinned' : undefined}>{tab.pinned ? '◆' : '▤'}</span>{titles[tab.noteId] ?? 'Untitled'}</button>
+            <button type="button" class="tab-action" aria-label={`Actions for ${titles[tab.noteId] ?? 'Untitled'}`} disabled={frozen || busy || loading} onclick={event => openTabMenu(event, tab.noteId)}>···</button>
+            <button type="button" class="tab-action" aria-label={`Close ${titles[tab.noteId] ?? 'Untitled'}`} disabled={frozen || busy || loading} onclick={() => runTab(() => closeNote(tab.noteId))}>×</button>
+          </div>
+        {/each}
+      </div>
+      <div bind:this={tabMenu} popover class="command-menu" style:left={`${menuX}px`} style:top={`${menuY}px`} aria-label="Tab actions">
+        <button type="button" disabled={frozen || busy || loading} onclick={() => tabAction('rename')}>Rename…</button>
+        <button type="button" disabled={frozen || busy || loading} onclick={() => tabAction('pin')}>{session.tabs.find(tab => tab.noteId === menuNote)?.pinned ? 'Unpin tab' : 'Pin tab'}</button>
+        <button type="button" disabled={frozen || busy || loading} onclick={() => tabAction('left')}>Move tab left</button>
+        <button type="button" disabled={frozen || busy || loading} onclick={() => tabAction('right')}>Move tab right</button>
+        <button type="button" disabled={frozen || busy || loading} onclick={() => tabAction('close')}>Close tab</button>
+      </div>
+      {#if renaming && session.activeNoteId}
+        <form class="rename-bar" onsubmit={renameNote}><label for="note-title">Note title</label><input id="note-title" bind:value={renameValue} disabled={frozen || busy} /><button type="submit" disabled={frozen || busy}>Apply</button><button type="button" onclick={() => { renaming = false; view?.focus(); }}>Cancel</button></form>
+      {/if}
+      {#if findVisible}
+        <form class="find-bar" onsubmit={find}>
+          <label for="find">Find</label><input id="find" onkeydown={event => { if (event.key === 'Escape') { event.preventDefault(); findVisible = false; view?.focus(); } }} placeholder="Find in note…" bind:value={query} disabled={loading || frozen || inserting || busy || !session.activeNoteId || !!startupError} />
+          <button type="submit" disabled={loading || frozen || inserting || busy || !session.activeNoteId || !!startupError}>Find next</button>
+          <button type="button" aria-label="Close find" onclick={() => { findVisible = false; view?.focus(); }}>×</button>
+        </form>
+      {/if}
+
+        <div id="note-panel" role="tabpanel" tabindex="0" aria-label="Active note" class="relative min-h-0 min-w-0 flex-1">
+          <div class="h-full" class:hidden={!session.activeNoteId} bind:this={host}></div>
+          {#if !loading && !startupError && !session.activeNoteId}<div class="flex h-full flex-col items-center justify-center gap-3"><p>All tabs closed. Your notes are preserved.</p><button type="button" disabled={frozen || busy} onclick={() => runTab(newNote)}>Create a note</button><p class="text-xs">Open a note from the sidebar or reopen the last closed tab.</p></div>{/if}
+        </div>
     </div>
   </div>
-  <footer class="bg-[#252526] px-4 py-1 text-xs text-[#b5b5b5]" role="status" aria-live="polite">
-    {loading ? 'Loading notes…' : frozen ? 'Finishing current work…' : startupError ? 'Notes unavailable' : saveStatus === 'Error' ? 'Save failed — retry or export recovery' : saveStatus}
-    {#if notice}<span class="ml-3">{notice}</span>{/if}
+  <div bind:this={libraryMenu} popover class="command-menu" style:left={`${menuX}px`} style:top={`${menuY}px`} aria-label="Note actions">
+    {#if libraryTarget?.deletedAt != null}
+      <button type="button" disabled={frozen || busy || loading || inserting} onclick={() => libraryAction('restore')}>Restore note</button>
+      <button type="button" disabled={frozen || busy || loading || inserting} onclick={() => libraryAction('purge')}>Delete permanently…</button>
+    {:else}
+      <button type="button" disabled={frozen || busy || loading || inserting} onclick={() => libraryAction('rename')}>Rename…</button>
+      <button type="button" disabled={frozen || busy || loading || inserting} onclick={() => libraryAction('trash')}>Move to Trash</button>
+    {/if}
+  </div>
+  <footer class="status-bar">
+    <span role="status" aria-live="polite">{loading ? 'Loading notes…' : frozen ? 'Finishing current work…' : startupError ? 'Notes unavailable' : saveStatus === 'Error' ? 'Save failed — retry or export recovery' : saveStatus}</span>
+    {#if notice}<span class="status-notice" role="status">{notice}</span>{/if}
+    <fieldset class="status-tools" disabled={loading || frozen || inserting || busy || !session.activeNoteId || !!startupError} aria-label="Editor preferences">
+      <button type="button" aria-pressed={wrap} onclick={toggleWrap}>Wrap: {wrap ? 'On' : 'Off'}</button>
+      <label><span class="sr-only">Language</span><select aria-label="Note language" bind:value={language} onchange={changeLanguage}>{#each Object.entries(languageNames) as [value, name]}<option {value}>{name}</option>{/each}</select></label>
+    </fieldset>
   </footer>
 </main>
 {#if annotation}

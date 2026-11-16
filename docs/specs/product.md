@@ -102,3 +102,10 @@ Verification must not use browser tests or visual tests, including manual visual
 ## Out of scope
 
 Sync, accounts, collaboration, mobile/web distribution, plugins, terminals, folders/projects, Git integration, AI, rich text formatting, and full VS Code compatibility.
+
+
+## Compact editor interface
+
+The main workspace prioritizes the editor: a compact header exposes New note, Paste screenshot, sidebar toggle, and an overflow menu. Tabs show the active note and pin marker, with close and action buttons. Right-clicking a tab opens the same actions: rename, pin/unpin, move left/right, and close. The sidebar spans the workspace from below the header to above the status bar, beside both tabs and editor. Notes use single file-style rows. Right-click, the context-menu key, or Shift+F10 opens rename/Trash actions; Trash rows offer restore/permanent deletion.
+
+Find opens on demand from the menu or Ctrl/Cmd+F inside the editor. Escape in the search input closes it. Language and word wrap remain in the status bar beside save feedback. Backup and restore live in a modal settings dialog, retaining explicit replacement confirmation and recovery access after startup failure. No new account, sync, manual save, or UI framework is introduced. Ticket 010 remains postponed; ticket 011 records this interface enhancement.

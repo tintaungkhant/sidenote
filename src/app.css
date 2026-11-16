@@ -10,3 +10,69 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
 /* Shared shell tokens keep tabs, sidebar, and editor surfaces consistent. */
 :root { --editor: #1e1e1e; --surface: #252526; --border: #333; }
 button:disabled { cursor: default; opacity: 0.5; }
+
+/* Compact desktop shell. Native menus/dialogs supply dismissal and focus containment. */
+:root { font-family: 'Segoe UI', system-ui, sans-serif; --accent: #75beff; --muted: #969696; }
+button { border: 1px solid transparent; border-radius: 4px; padding: 5px 9px; line-height: 1.35; transition: background-color 100ms; }
+button:hover:not(:disabled) { background: #ffffff12; }
+button[aria-pressed='true'] { background: #37373d; color: white; }
+input, select, textarea { border: 1px solid #484848; border-radius: 3px; background: #313131; color: #ddd; padding: 5px 8px; }
+input::placeholder { color: #a1a1a1; }
+fieldset { min-width: 0; }
+.app-header { display: flex; flex-shrink: 0; align-items: center; gap: 8px; height: 48px; padding: 0 12px; border-bottom: 1px solid var(--border); background: #252526; }
+.app-header h1 { font-size: 13px; font-weight: 600; letter-spacing: .2px; }
+.header-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.icon-button { font-size: 19px; min-width: 32px; padding: 2px 6px; }
+.primary-button { background: #0e639c; color: white; }
+.primary-button:hover:not(:disabled) { background: #1177bb; }
+.command-menu { position: fixed; inset: auto; margin: 0; width: 224px; padding: 5px; background: #252526; color: #ddd; border: 1px solid #505050; border-radius: 6px; box-shadow: 0 8px 24px #0007; max-height: calc(100dvh - 16px); overflow: auto; }
+.command-menu button { display: flex; align-items: center; justify-content: space-between; width: 100%; text-align: left; font-size: 12px; padding: 7px 9px; }
+.command-menu fieldset { border-block: 1px solid var(--border); padding-block: 4px; margin-block: 4px; }
+.command-menu kbd { font-size: 10px; color: var(--muted); margin-left: 8px; }
+.app-menu { top: 47px; right: 12px; left: auto; width: 280px; }
+.tab-strip { display: flex; flex-shrink: 0; min-height: 38px; overflow-x: auto; background: #181818; border-bottom: 1px solid var(--border); }
+.note-tab { display: flex; align-items: center; flex-shrink: 0; border-right: 1px solid #2b2b2b; border-top: 2px solid transparent; color: #aaa; background: #242424; }
+.note-tab.active { background: var(--editor); border-top-color: var(--accent); color: #fff; }
+.tab-label { max-width: 220px; min-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 8px 10px; text-align: left; border-radius: 0; font-size: 12px; }
+.tab-symbol { color: var(--accent); margin-right: 8px; font-size: 11px; }
+.tab-action { padding: 2px 5px; margin-right: 2px; color: #aaa; }
+.rename-bar, .find-bar { display: flex; flex-shrink: 0; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.find-bar { justify-content: flex-end; }
+.find-bar input, .rename-bar input { width: min(360px, 45vw); min-width: 0; }
+/* Independent columns keep the explorer beside tabs, find, and the editor. */
+.workspace { display: flex; flex: 1; min-height: 0; }
+.editor-column { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
+.note-sidebar { width: 244px; flex-shrink: 0; overflow-y: auto; border-right: 1px solid var(--border); background: #252526; padding: 14px 10px; }
+.note-sidebar legend { font-size: 10px; font-weight: 600; letter-spacing: 1.3px; color: #aaa; margin: 0 8px 14px; }
+.library-switch { display: flex; gap: 4px; padding: 3px; background: #1e1e1e; border-radius: 5px; margin-bottom: 12px; }
+.library-switch button { flex: 1; font-size: 12px; }
+.library-search { display: flex; gap: 4px; margin-bottom: 14px; }
+.library-search input { width: 100%; min-width: 0; font-size: 12px; }
+.library-search button { padding-inline: 6px; }
+/* Single-line explorer rows have no hidden action area reserving vertical space. */
+.library-row { display: flex; align-items: center; gap: 8px; width: 100%; height: 28px; padding: 3px 8px; border-radius: 0; text-align: left; font-size: 12px; }
+.library-row.current { background: #37373d; color: #fff; }
+.file-symbol { flex-shrink: 0; color: var(--accent); font-size: 11px; }
+.file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.empty-library { color: #999; font-size: 12px; line-height: 1.6; padding: 8px; }
+.status-bar { display: flex; flex-shrink: 0; align-items: center; gap: 12px; min-height: 28px; padding: 0 12px; border-top: 1px solid var(--border); background: #252526; font-size: 11px; color: #b7b7b7; }
+.status-notice { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.status-tools { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-shrink: 0; }
+.status-tools button, .status-tools select { padding: 3px 6px; font-size: 11px; background: transparent; border-color: transparent; }
+.settings-dialog { margin: auto; width: min(600px, calc(100vw - 32px)); max-height: calc(100dvh - 48px); overflow: auto; border: 1px solid #505050; border-radius: 8px; background: #252526; color: #ddd; padding: 22px; box-shadow: 0 16px 64px #0008; }
+.settings-dialog::backdrop { background: #0008; }
+.dialog-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+.dialog-heading h2 { font-size: 16px; font-weight: 600; }
+.settings-dialog p { margin-block: 12px; line-height: 1.6; font-size: 12px; }
+.settings-dialog > button, .dialog-actions button { background: #37373d; margin-right: 6px; margin-top: 6px; }
+.dialog-actions { display: flex; justify-content: flex-end; margin-top: 16px; }
+
+@media (max-width: 640px) {
+  .app-header { padding-inline: 6px; gap: 4px; }
+  .app-header h1 { display: none; }
+  .header-actions { gap: 2px; }
+  .note-sidebar { width: 190px; }
+  .status-bar { flex-wrap: wrap; gap: 4px 8px; }
+  .status-notice { max-width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) { button { transition: none; } }

@@ -15,7 +15,8 @@ All tickets follow the testing constraint: no browser tests or visual tests, inc
 | [007](007-image-copy-export.md) | Flattened image copy and PNG export | 006 |
 | [008](008-note-library-trash.md) | All Notes search and recoverable deletion | 004 |
 | [009](009-backup-recovery.md) | Automatic backups, export, safe restore | 003, 008 |
-| [010](010-cross-platform-release.md) | Accessibility, security, performance, OS proof | 001–009 |
+| [010](010-cross-platform-release.md) | Accessibility, security, performance, OS proof (postponed) | 001–009 |
+| [011](011-compact-editor-ui.md) | Compact editor shell, menus, and backup settings | 001–009 |
 
 Each ticket must record checks run, results, and unresolved limitations before moving to Done. Product behavior is defined in [the product specification](../specs/product.md); storage and invariants are in [the technical specification](../specs/technical.md).
 

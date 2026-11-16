@@ -1,6 +1,6 @@
 # 010 — Verify the first desktop release
 
-Status: Todo
+Status: Postponed at user request (2026-11-16). UI enhancement proceeds separately in ticket 011.
 Dependencies: 001–009
 
 ## Outcome
