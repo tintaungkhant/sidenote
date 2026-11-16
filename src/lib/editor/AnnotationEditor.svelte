@@ -1,8 +1,10 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
+  import { errorMessage } from '$lib/autosave';
   import type { Annotation, ImageBlock } from './document';
   import { AnnotationHistory, annotationKey, annotationSvg, imagePoint, translate, type Point, type Tool } from './annotations';
-  let { block, blob, status, onchange, onclose }: { block: ImageBlock; blob: Blob; status: string; onchange: (annotations: readonly Annotation[]) => void; onclose: () => void } = $props();
+  let { block, blob, status, onchange, onclose, onoutput }: { block: ImageBlock; blob: Blob; status: string; onchange: (annotations: readonly Annotation[]) => void; onclose: () => void;
+    onoutput: (action: 'copy' | 'export', annotations: readonly Annotation[], width: number, height: number) => Promise<string> } = $props();
   let annotations = $state.raw<readonly Annotation[]>(untrack(() => block.annotations));
   const operations = new AnnotationHistory(untrack(() => annotations));
   let tool = $state<Tool>('select'), color = $state('#ff4444'), width = $state(4);
@@ -11,6 +13,7 @@
   let gesture = $state.raw<{ start: Point; original?: Annotation; draft?: Annotation; pointer: number } | undefined>();
   let textDraft = $state('');
   let validation = $state('');
+  let outputBusy = $state(false), outputMessage = $state('');
   const tools: Tool[] = ['select', 'pen', 'highlighter', 'arrow', 'text'];
 
   /** The focused view owns its decoded image URL and restores note focus through the caller. */
@@ -40,7 +43,7 @@
   function point(event: PointerEvent) { return imagePoint(event.clientX, event.clientY, surface.getBoundingClientRect(), imageWidth, imageHeight); }
   /** Begin a captured gesture or create a keyboard-editable text object at the chosen image pixel. */
   function start(event: PointerEvent) {
-    if (event.button !== 0 || !imageWidth || gesture) return;
+    if (outputBusy || event.button !== 0 || !imageWidth || gesture) return;
     event.preventDefault(); surface.focus();
     const p = point(event);
     if (tool === 'select') {
@@ -79,6 +82,7 @@
   /** Keyboard actions never bubble into note-level history, tab, or quit shortcuts. */
   function key(event: KeyboardEvent) {
     event.stopPropagation();
+    if (outputBusy) { if (event.key !== 'Tab') event.preventDefault(); return; }
     const editing = event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement;
     const action = annotationKey(event, editing);
     if (!action) return;
@@ -104,11 +108,20 @@
     }
     validation = ''; replace({ ...a, text: textDraft });
   }
+  /** Only completed operations enter output; failure/cancellation leaves source and annotation history untouched. */
+  async function output(action: 'copy' | 'export') {
+    if (outputBusy || !imageWidth) return;
+    gesture = undefined; outputBusy = true; outputMessage = action === 'copy' ? 'Copying image…' : 'Exporting PNG…';
+    try { outputMessage = await onoutput(action, annotations, imageWidth, imageHeight); }
+    catch (error) { outputMessage = `Could not ${action === 'copy' ? 'copy image' : 'export PNG'}: ${errorMessage(error)}. Your annotations remain editable; retry or choose another destination.`; }
+    finally { outputBusy = false; }
+  }
   let preview = $derived(gesture?.draft ? gesture.original ? annotations.map((a, i) => i === selected ? gesture!.draft! : a) : [...annotations, gesture.draft] : annotations);
 </script>
 
-<dialog bind:this={dialog} aria-label="Image annotations" tabindex="-1" onkeydown={key} oncancel={event => { event.preventDefault(); onclose(); }}
+<dialog bind:this={dialog} aria-label="Image annotations" aria-busy={outputBusy} tabindex="-1" onkeydown={key} oncancel={event => { event.preventDefault(); if (!outputBusy) onclose(); }}
   class="fixed inset-0 m-0 flex h-dvh max-h-none w-screen max-w-none flex-col overflow-hidden border-0 bg-[var(--editor)] p-0 text-[#d4d4d4]">
+  <fieldset class="contents" disabled={outputBusy} aria-label="Annotation tools">
   <div class="flex flex-wrap items-center gap-3 border-b border-[var(--border)] p-2">
     {#each tools as item}<button type="button" aria-pressed={tool === item} onclick={() => { gesture = undefined; tool = item; }}>{item}</button>{/each}
     <label>Color <select bind:value={color}>{#each ['#ff4444', '#ffff00', '#44cc66', '#3399ff', '#ffffff', '#000000'] as value}<option {value}>{value}</option>{/each}</select></label>
@@ -116,10 +129,13 @@
     <button type="button" onclick={() => history()}>Undo</button><button type="button" onclick={() => history(true)}>Redo</button>
     <button type="button" disabled={!imageWidth} onclick={() => addText()}>Add text at center</button>
     <button type="button" disabled={selected < 0} onclick={() => { commit(annotations.filter((_, i) => i !== selected)); select(-1); }}>Delete</button>
+    <button type="button" disabled={!imageWidth} onclick={() => output('copy')}>Copy Image</button>
+    <button type="button" disabled={!imageWidth} onclick={() => output('export')}>Export PNG</button>
     <button type="button" onclick={onclose}>Done (Esc)</button>
   </div>
   <p class="px-2 text-xs">V select · P pen · H highlighter · A arrow · T text. Canvas: Tab selects, arrows move, Delete removes.</p>
   <p class="px-2 text-xs" role="status">{status}</p>
+  {#if outputMessage}<p class="px-2 text-xs" role="status">{outputMessage}</p>{/if}
   {#if validation}<p class="px-2 text-xs" role="alert">{validation}</p>{/if}
   {#if annotations[selected]?.kind === 'text'}
     <label class="flex gap-2 p-2">Text <textarea class="flex-1 bg-[var(--surface)]" aria-label="Annotation text" bind:value={textDraft} oninput={editText}></textarea></label>
@@ -138,4 +154,5 @@
       {/if}
     </div>
   </div>
+  </fieldset>
 </dialog>

@@ -13,7 +13,8 @@
   import { listen } from '@tauri-apps/api/event';
   import { createNoteState, imageField, insertImage, moveRange, textSearch, annotateImage } from '$lib/editor/state';
   import AnnotationEditor from '$lib/editor/AnnotationEditor.svelte';
-  import { decodeDocument, type AttachmentId, type ImageBlock, type ImageId } from '$lib/editor/document';
+  import { decodeDocument, type Annotation, type AttachmentId, type ImageBlock, type ImageId } from '$lib/editor/document';
+  import { flattenImage } from '$lib/editor/image-output';
   import { imagePresentation } from '$lib/editor/view';
   import { Autosave, errorMessage, type SaveStatus } from '$lib/autosave';
   import { ExitGuard } from '$lib/exit';
@@ -37,6 +38,7 @@
   let bootstrap: Promise<void> = Promise.resolve();
   let insertion: Promise<void> | undefined;
   let recovery: Promise<void> | undefined;
+  let imageOutput: Promise<string> | undefined;
   let disposed = false;
   let loading = $state(true);
   let frozen = $state(false);
@@ -64,8 +66,8 @@
 
   const exit = new ExitGuard({
     freeze: setFrozen,
-    /** Await startup and any already-started image insertion before taking the final close snapshot. */
-    prepare: async () => { await bootstrap.catch(() => {}); await insertion; await recovery; await transition; stageSession(); },
+    /** Await startup, image insertion/output, recovery, and tab transitions before taking the final close snapshot. */
+    prepare: async () => { await bootstrap.catch(() => {}); await insertion; await recovery; await imageOutput?.catch(() => {}); await transition; stageSession(); },
     flush: async () => {
       if (!saver) throw new Error(startupError || 'Storage has not finished loading');
       await saver.flush();
@@ -424,6 +426,19 @@
   /** Return to the unchanged editor selection and scroll; only unfinished canvas gestures are discarded. */
   function closeAnnotation() { annotation = undefined; view?.focus(); }
 
+  /** Export the current completed snapshot, independent of save acknowledgements; guarded exit awaits native output. */
+  function outputAnnotation(action: 'copy' | 'export', annotations: readonly Annotation[], width: number, height: number): Promise<string> {
+    if (!annotation || frozen || imageOutput) return Promise.reject(new Error('Image output is unavailable. Reopen the image and retry.'));
+    const original = annotation.blob;
+    const pending = (async () => {
+      const png = await flattenImage(original, annotations, width, height);
+      if (action === 'copy') { await storage.copyImage(png); return 'Image copied.'; }
+      return await storage.exportImage(png) ? 'PNG exported.' : 'PNG export cancelled.';
+    })();
+    imageOutput = pending;
+    return pending.finally(() => { imageOutput = undefined; });
+  }
+
   /** Retry saving in place; success preserves current content and undo history. */
   async function retrySave() {
     try { await saver?.flush(); } catch { /* Autosave retains the error and dirty generations for another retry or export. */ }
@@ -534,6 +549,7 @@
 </main>
 {#if annotation}
   <AnnotationEditor block={annotation.block} blob={annotation.blob} status={saveError ? `Could not save: ${saveError}. Your work remains open.` : saveStatus}
+    onoutput={outputAnnotation}
     onchange={annotations => { if (view && annotation) view.dispatch(annotateImage(view.state, annotation.block.id, annotations)); }}
     onclose={closeAnnotation} />
 {/if}

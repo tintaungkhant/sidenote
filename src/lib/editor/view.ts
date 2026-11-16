@@ -64,7 +64,7 @@ export function imagePresentation(load: (id: AttachmentId) => Promise<Blob>, ope
       state.field(imageField).map(image => Decoration.replace({ widget: new ImageWidget(image.block, load, open) }).range(image.from, image.from + 1))
     )),
     EditorView.domEventHandlers({
-      /** Export text without image markers; native image copy belongs to ticket 007. */
+      /** Export text without image markers; native image copy is available in the focused annotation view. */
       copy(event, view) {
         return exportClipboard(event, view, false);
       },

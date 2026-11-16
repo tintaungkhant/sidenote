@@ -1,5 +1,6 @@
 mod clipboard;
 mod commands;
+mod image_output;
 mod lifecycle;
 mod queue;
 mod recovery;
@@ -38,6 +39,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             clipboard::paste_image,
+            image_output::copy_image,
+            image_output::export_image,
             commands::create_note,
             commands::load_note,
             commands::update_note,

@@ -4,7 +4,7 @@ import type { AttachmentId, NoteDocument } from './editor/document';
 
 export type NoteId = string & { readonly noteId: unique symbol };
 export type NoteLanguage = 'plaintext' | 'markdown' | 'javascript' | 'typescript' | 'json' | 'html';
-export type StoreError = { code: 'validation' | 'database' | 'filesystem' | 'schema' | 'data' | 'clock' | 'not_found' | 'missing_attachment' | 'conflict' | 'unavailable' | 'recovery'; message: string };
+export type StoreError = { code: 'validation' | 'database' | 'filesystem' | 'schema' | 'data' | 'clock' | 'not_found' | 'missing_attachment' | 'conflict' | 'unavailable' | 'recovery' | 'image_output'; message: string };
 export type NoteInput = { title: string; document: NoteDocument; language: NoteLanguage };
 export type NoteSummary = { id: NoteId; title: string; language: NoteLanguage; revision: number; createdAt: number; updatedAt: number; deletedAt: number | null };
 export type Note = NoteSummary & { document: NoteDocument };
@@ -44,3 +44,8 @@ export function exportRecovery(snapshot: string): Promise<{ exported: boolean; m
 
 /** Read native screenshot pixels and store the original before exposing its identity to the editor. */
 export function pasteImage(): Promise<Attachment | null> { return invoke("paste_image"); }
+
+/** Copy flattened PNG pixels through native OS formats; binary IPC avoids JSON expansion. */
+export function copyImage(png: Uint8Array): Promise<void> { return invoke('copy_image', png); }
+/** Export through the native destination picker; false means cancellation, never success. */
+export function exportImage(png: Uint8Array): Promise<boolean> { return invoke('export_image', png); }
