@@ -4,7 +4,7 @@
   import { Compartment, EditorState } from '@codemirror/state';
   import { EditorView, drawSelection, highlightActiveLine, keymap, lineNumbers, type Command } from '@codemirror/view';
   import { defaultKeymap, historyKeymap, indentWithTab, undo, redo, moveLineUp, moveLineDown, copyLineUp, copyLineDown, transposeChars } from '@codemirror/commands';
-  import { bracketMatching, defaultHighlightStyle, indentOnInput, syntaxHighlighting } from '@codemirror/language';
+  import { bracketMatching, indentOnInput } from '@codemirror/language';
   import { findNext, search, setSearchQuery } from '@codemirror/search';
   import { javascript } from '@codemirror/lang-javascript';
   import { json } from '@codemirror/lang-json';
@@ -15,7 +15,7 @@
   import AnnotationEditor from '$lib/editor/AnnotationEditor.svelte';
   import { decodeDocument, type Annotation, type AttachmentId, type ImageBlock, type ImageId } from '$lib/editor/document';
   import { flattenImage } from '$lib/editor/image-output';
-  import { imagePresentation } from '$lib/editor/view';
+  import { imagePresentation, cursorSyntaxExtension } from '$lib/editor/view';
   import { Autosave, errorMessage, type SaveStatus } from '$lib/autosave';
   import { ExitGuard } from '$lib/exit';
   import { emptySession, normalizeSession, openTab, closeTab, changeTab, automaticTitle, tabShortcut } from '$lib/tabs';
@@ -264,6 +264,17 @@
     view.destroy(); view = undefined; note = undefined;
   }
 
+  function getLangBadge(lang?: storage.NoteLanguage): { label: string; cls: string } {
+    switch (lang) {
+      case 'typescript': return { label: 'TS', cls: 'ts' };
+      case 'javascript': return { label: 'JS', cls: 'js' };
+      case 'markdown': return { label: 'MD', cls: 'md' };
+      case 'json': return { label: '{}', cls: 'json' };
+      case 'html': return { label: '<>', cls: 'html' };
+      default: return { label: 'TXT', cls: 'txt' };
+    }
+  }
+
   /** Prepare originals before replacing the active view so load failures preserve current work. */
   async function mountNote(id: storage.NoteId) {
       if (view && note?.id === id) return;
@@ -284,7 +295,7 @@
       const idForView = id;
       view = new EditorView({ parent: host, state: createNoteState(loaded.document, [
         lineNumbers(), drawSelection(), highlightActiveLine(), indentOnInput(), bracketMatching(),
-        syntaxHighlighting(defaultHighlightStyle), search(), imagePresentation(async id => {
+        cursorSyntaxExtension, search(), imagePresentation(async id => {
           const cached = sources.get(id);
           if (cached) return cached;
           const original = await storage.loadAttachment(idForView, id);
@@ -664,15 +675,35 @@
 
 <svelte:head><title>Simple Note</title></svelte:head>
 
-<main class="flex h-dvh flex-col bg-[#1e1e1e] text-sm text-[#d4d4d4]" aria-busy={loading || frozen}>
+<main class="flex h-dvh flex-col bg-[var(--bg-app)] text-sm text-[var(--text-primary)]" aria-busy={loading || frozen}>
   <!-- Primary actions stay visible; infrequent commands use the native light-dismiss popover. -->
   <header class="app-header">
-    <img class="app-mark" src="/app-icon.png" alt="Simple Note" />
+    <div class="app-brand">
+      <img class="app-mark" src="/app-icon.png" alt="Simple Note" />
+      <span class="app-title">Simple Note</span>
+      <span class="app-badge">DEV</span>
+    </div>
     <nav class="app-menubar" aria-label="Application menus">
       {#each ['File', 'Edit', 'View'] as name}
         <button type="button" aria-haspopup="true" popovertarget={`app-${name.toLowerCase()}-menu`} onclick={event => { event.preventDefault(); openAppMenu(event, `app-${name.toLowerCase()}-menu`); }}>{name}</button>
       {/each}
     </nav>
+    <div class="header-center">
+      <button type="button" class="header-search-pill" disabled={loading || frozen || busy} onclick={() => runTab(() => showSidebarPanel('search'))}>
+        <svg class="w-3.5 h-3.5 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg>
+        <span>Search notes or text…</span>
+        <kbd>Ctrl+Shift+F</kbd>
+      </button>
+    </div>
+    <div class="header-actions">
+      <button type="button" class="header-btn header-btn-primary" disabled={loading || frozen || busy || !!startupError} onclick={() => runTab(newNote)}>
+        <span>＋ Note</span>
+      </button>
+      <div class="save-badge" title={saveError ? `Save failed: ${saveError}` : `Status: ${saveStatus}`}>
+        <span class="save-dot" class:saved={saveStatus === 'Saved' && !saveError} class:saving={saveStatus === 'Saving' && !saveError} class:error={saveStatus === 'Error' || !!saveError}></span>
+        <span>{saveStatus === 'Error' || saveError ? 'Error' : saveStatus}</span>
+      </div>
+    </div>
     <div id="app-file-menu" popover class="command-menu app-command-menu">
       <button type="button" disabled={loading || frozen || busy || !!startupError} onclick={() => { closeAppMenus(); runTab(newNote); }}>New note <kbd>Ctrl+N</kbd></button>
       <button type="button" disabled={loading || frozen || busy || !closed.length} onclick={() => { closeAppMenus(); runTab(reopenNote); }}>Reopen closed tab <kbd>Ctrl+Shift+T</kbd></button>
@@ -698,27 +729,37 @@
   </header>
   <dialog bind:this={backupDialog} class="settings-dialog" aria-labelledby="backup-heading" oncancel={event => { if (backupPending || restorePreview) event.preventDefault(); }}>
     <div class="dialog-heading"><h2 id="backup-heading">Backup and restore</h2><button type="button" aria-label="Close backup settings" disabled={backupPending || !!restorePreview} onclick={() => backupDialog.close()}>×</button></div>
-    <p>Local SQLite backups include all notes, Trash, images, annotations, and tabs.</p>
-    <p class="break-all">Automatic backups: {backupStatus.directory || 'Loading backup location…'}</p>
-    {#if backupStatus.lastBackup}<p class="break-all">Latest automatic snapshot: {backupStatus.lastBackup}</p>{/if}
-    <button type="button" disabled={loading || frozen || backupPending || !!startupError} onclick={exportWorkspaceBackup}>Export workspace backup</button>
-    <button type="button" disabled={loading || frozen || backupPending} onclick={selectWorkspaceBackup}>Select backup to restore…</button>
-    {#if backupPending}<p role="status">Working on backup or restore…</p>{/if}
+    <div class="backup-card">
+      <p class="font-medium text-white mb-1">Local SQLite snapshots are fully self-contained.</p>
+      <p class="text-neutral-400">Backups preserve all notes, source code, attachments, inline images, and tab sessions.</p>
+      <div class="mt-3 pt-3 border-t border-[#232533] space-y-1 text-xs">
+        <p class="break-all text-neutral-300"><strong>Storage directory:</strong> {backupStatus.directory || 'Loading backup location…'}</p>
+        {#if backupStatus.lastBackup}<p class="break-all text-neutral-300"><strong>Latest snapshot:</strong> {backupStatus.lastBackup}</p>{/if}
+      </div>
+    </div>
+    <div class="flex gap-2 mb-3">
+      <button type="button" class="header-btn px-3 py-1.5 border border-[#2d3142] bg-[#1a1c26] text-white" disabled={loading || frozen || backupPending || !!startupError} onclick={exportWorkspaceBackup}>Export workspace backup</button>
+      <button type="button" class="header-btn px-3 py-1.5 border border-[#2d3142] bg-[#1a1c26] text-white" disabled={loading || frozen || backupPending} onclick={selectWorkspaceBackup}>Select backup to restore…</button>
+    </div>
+    {#if backupPending}<p role="status" class="text-xs text-amber-400 font-medium">Working on backup or restore…</p>{/if}
     {#if restorePreview}
-      <div role="alert" class="my-2 border border-[#a66] p-2">
-        <p>Replace all local notes, Trash, images, and tabs with this backup ({restorePreview.notes} notes, {restorePreview.trashed} in Trash)? This does not merge workspaces.</p>
-        <p>Current edits will be saved first. A pre-restore backup is kept. If the current store is unreadable, its original database files are preserved instead.</p>
-        <button type="button" disabled={loading || frozen || backupPending} onclick={confirmWorkspaceRestore}>Confirm replacement and restore</button>
-        <button type="button" disabled={frozen || backupPending} onclick={cancelWorkspaceRestore}>Cancel restore</button>
+      <div role="alert" class="my-3 border border-amber-500/50 bg-amber-950/20 rounded-lg p-3 text-xs">
+        <p class="font-semibold text-amber-300 mb-1">Confirm Restore & Replace</p>
+        <p class="text-neutral-300 mb-2">Replace all local notes, Trash, images, and tabs with this backup ({restorePreview.notes} notes, {restorePreview.trashed} in Trash)? This does not merge workspaces.</p>
+        <p class="text-neutral-400 mb-2">Current edits will be saved first. A pre-restore backup is kept. If the current store is unreadable, its original database files are preserved instead.</p>
+        <div class="flex gap-2">
+          <button type="button" class="bg-amber-600 hover:bg-amber-500 text-white font-medium px-3 py-1 rounded" disabled={loading || frozen || backupPending} onclick={confirmWorkspaceRestore}>Confirm replacement and restore</button>
+          <button type="button" class="bg-[#242633] px-3 py-1 rounded text-neutral-300" disabled={frozen || backupPending} onclick={cancelWorkspaceRestore}>Cancel restore</button>
+        </div>
       </div>
     {/if}
 
-    {#if notice}<p role="status">{notice}</p>{/if}
-    <div class="dialog-actions"><button type="button" disabled={backupPending || !!restorePreview} onclick={() => backupDialog.close()}>Done</button></div>
+    {#if notice}<p role="status" class="text-xs text-sky-400 mt-2">{notice}</p>{/if}
+    <div class="dialog-actions"><button type="button" class="header-btn header-btn-primary px-4 py-1.5" disabled={backupPending || !!restorePreview} onclick={() => backupDialog.close()}>Done</button></div>
   </dialog>
-  {#if backupStatus.error}<div role="alert" class="bg-[#522] px-4 py-2">Automatic backup failed: {backupStatus.error}. Acknowledged saves remain intact. The next successful write retries the backup.</div>{/if}
+  {#if backupStatus.error}<div role="alert" class="bg-[#522] px-4 py-2 border-b border-red-500/30">Automatic backup failed: {backupStatus.error}. Acknowledged saves remain intact. The next successful write retries the backup.</div>{/if}
   {#if startupError}
-    <div class="flex flex-wrap gap-3 bg-[#522] px-4 py-2" role="alert">
+    <div class="flex flex-wrap gap-3 bg-[#522] px-4 py-2 border-b border-red-500/30" role="alert">
       <span>Could not load notes: {startupError}</span>
       <button type="button" disabled={loading || frozen} onclick={retryStartup}>Retry loading</button>
       <button type="button" disabled={loading || frozen || backupPending} onclick={() => { openBackups(); selectWorkspaceBackup(); }}>Recover from a backup…</button>
@@ -726,7 +767,7 @@
     </div>
   {/if}
   {#if saveError}
-    <div class="flex flex-wrap gap-3 bg-[#522] px-4 py-2" role="alert">
+    <div class="flex flex-wrap gap-3 bg-[#522] px-4 py-2 border-b border-red-500/30" role="alert">
       <span>Could not save: {saveError}. Your current work remains open.</span>
       <button type="button" disabled={frozen} onclick={retrySave}>Retry saving</button>
       <button type="button" disabled={frozen} onclick={exportCurrentRecovery}>Export recovery</button>
@@ -734,7 +775,7 @@
     </div>
   {/if}
   {#if confirmDiscard}
-    <div class="flex flex-wrap gap-3 bg-[#522] px-4 py-2" role="alert">
+    <div class="flex flex-wrap gap-3 bg-[#522] px-4 py-2 border-b border-red-500/30" role="alert">
       <span>Discard all unsaved changes and quit? Only acknowledged saves will remain.</span>
       <button type="button" disabled={frozen} onclick={() => { confirmDiscard = false; void exit.request(true); }}>Confirm discard and quit</button>
       <button type="button" disabled={frozen} onclick={() => { confirmDiscard = false; }}>Keep editing</button>
@@ -749,49 +790,84 @@
       <button type="button" aria-label="Search" title="Search (Ctrl+Shift+F)" aria-pressed={session.sidebarVisible && sidebarPanel === 'search'} disabled={loading || frozen || busy} onclick={() => runTab(() => showSidebarPanel('search', true))}>
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg>
       </button>
+      <div class="activity-bar-bottom">
+        <button type="button" aria-label="Toggle word wrap" title={`Word wrap: ${wrap ? 'On' : 'Off'} (Alt+Z)`} aria-pressed={wrap} disabled={loading || frozen || busy || !session.activeNoteId} onclick={toggleWrap}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h10a3 3 0 1 1 0 6h-4M4 18h2M12 16l-2 2 2 2"/></svg>
+        </button>
+        <button type="button" aria-label="Backup and restore" title="Backup and restore…" disabled={loading || frozen || backupPending} onclick={openBackups}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3v12c0 1.7-3.6 3-8 3s-8-1.3-8-3V6zM4 12c0 1.7 3.6 3 8 3s8-1.3 8-3M4 18c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
+        </button>
+      </div>
     </nav>
     {#if session.sidebarVisible}<aside class="note-sidebar" aria-label={sidebarPanel === 'search' ? 'Search notes' : 'Notes'}>
       <fieldset disabled={loading || frozen || busy || !!annotation}>
-        <legend>{sidebarPanel === 'search' ? 'SEARCH' : 'EXPLORER'}</legend>
+        <div class="sidebar-header">
+          <span class="sidebar-title">{sidebarPanel === 'search' ? 'SEARCH' : 'EXPLORER'}</span>
+          <div class="sidebar-actions">
+            {#if sidebarPanel === 'explorer'}
+              <button type="button" class="sidebar-btn" title="New Note (Ctrl+N)" onclick={() => runTab(newNote)}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 5v14M5 12h14"/></svg>
+              </button>
+              <button type="button" class="sidebar-btn" title="Refresh notes" onclick={() => runTab(browseLibrary)}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16M16 16h5v5"/></svg>
+              </button>
+            {/if}
+          </div>
+        </div>
         <div id="explorer-panel" tabindex="-1">
         {#if sidebarPanel === 'explorer'}
         <div class="library-switch">
-        <button type="button" aria-pressed={!trash} onclick={() => runTab(async () => { trash = false; await browseLibrary(); })}>All Notes</button>
-        <button type="button" aria-pressed={trash} onclick={() => runTab(async () => { trash = true; await browseLibrary(); })}>Trash</button></div>
+          <button type="button" aria-pressed={!trash} onclick={() => runTab(async () => { trash = false; await browseLibrary(); })}>All Notes</button>
+          <button type="button" aria-pressed={trash} onclick={() => runTab(async () => { trash = true; await browseLibrary(); })}>Trash</button>
+        </div>
         {:else}
         <form class="library-search" onsubmit={event => { event.preventDefault(); runTab(() => browseLibrary()); }}>
-          <label class="sr-only" for="library-search">Search titles and text</label><input id="library-search" placeholder="Search notes…" bind:value={libraryQuery} />
+          <label class="sr-only" for="library-search">Search titles and text</label>
+          <input id="library-search" placeholder="Search notes…" bind:value={libraryQuery} />
           <button type="submit" aria-label="Search or refresh notes" title="Search or refresh">↵</button>
         </form>
         {/if}
         </div>
         {#each library as item (item.id)}
+          {@const badge = getLangBadge(notes.get(item.id)?.language)}
           <button type="button" class="library-row" class:current={!trash && session.activeNoteId === item.id}
             title={titles[item.id] ?? item.title} aria-haspopup="true"
             oncontextmenu={event => openLibraryMenu(event, item)}
             onkeydown={event => { if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) openLibraryMenu(event, item); }}
             onclick={event => { if (trash) openLibraryMenu(event, item); else runTab(() => mountNote(item.id)); }}>
-            <span class="file-symbol" aria-hidden="true">▤</span><span class="file-name">{titles[item.id] ?? item.title}</span>
+            <span class={`file-badge ${badge.cls}`}>{badge.label}</span>
+            <span class="file-name">{titles[item.id] ?? item.title}</span>
           </button>
         {/each}
         {#if !library.length}<p class="empty-library">{trash ? 'Trash is empty.' : 'No notes found. Try another search or create a note.'}</p>{/if}
-        {#if libraryMore}<button type="button" onclick={() => runTab(() => browseLibrary(true))}>Load more</button>{/if}
-        {#if purge}<div role="alert"><p>Permanently delete “{purge.title}”? This cannot be undone.</p><button type="button" onclick={() => runTab(() => lifecycle(purge!, 'purge'))}>Confirm permanent deletion</button><button type="button" onclick={() => { purge = undefined; }}>Cancel</button></div>{/if}
+        {#if libraryMore}<button type="button" class="w-full mt-2 py-1 bg-[#1a1c25] rounded text-xs text-neutral-300 hover:text-white" onclick={() => runTab(() => browseLibrary(true))}>Load more</button>{/if}
+        {#if purge}<div role="alert" class="p-3 my-2 border border-red-500/40 rounded-lg bg-red-950/30 text-xs"><p class="mb-2">Permanently delete “{purge.title}”? This cannot be undone.</p><div class="flex gap-2"><button type="button" class="bg-red-600 text-white px-2 py-1 rounded" onclick={() => runTab(() => lifecycle(purge!, 'purge'))}>Confirm</button><button type="button" class="bg-[#242633] px-2 py-1 rounded text-neutral-300" onclick={() => { purge = undefined; }}>Cancel</button></div></div>{/if}
       </fieldset>
     </aside>{/if}
     <div class="editor-column">
       <!-- One editor remains mounted; tab menus only change existing serialized operations. -->
       <div class="tab-strip" role="tablist" aria-label="Open notes">
         {#each session.tabs as tab, index (tab.noteId)}
+          {@const badge = getLangBadge(notes.get(tab.noteId)?.language)}
           <div class="note-tab" class:active={session.activeNoteId === tab.noteId}>
             <button id={`tab-${tab.noteId}`} type="button" role="tab" aria-selected={session.activeNoteId === tab.noteId} aria-controls="note-panel"
               tabindex={session.activeNoteId === tab.noteId ? 0 : -1} disabled={frozen || busy || loading}
               class="tab-label" oncontextmenu={event => openTabMenu(event, tab.noteId)}
-              onkeydown={event => tabKey(event, index)} onclick={() => runTab(() => mountNote(tab.noteId))}><span class="tab-symbol" aria-label={tab.pinned ? 'Pinned' : undefined}>{tab.pinned ? '◆' : '▤'}</span>{titles[tab.noteId] ?? 'Untitled'}</button>
+              onkeydown={event => tabKey(event, index)} onclick={() => runTab(() => mountNote(tab.noteId))}>
+              <span class="tab-symbol" aria-label={tab.pinned ? 'Pinned' : undefined}>
+                {#if tab.pinned}
+                  <svg class="w-3.5 h-3.5 text-indigo-400 inline-block align-middle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 17v5M9 3h6l1 7h-8z"/></svg>
+                {:else}
+                  <span class={`file-badge ${badge.cls}`}>{badge.label}</span>
+                {/if}
+              </span>
+              <span>{titles[tab.noteId] ?? 'Untitled'}</span>
+            </button>
             <button type="button" class="tab-action" aria-label={`Actions for ${titles[tab.noteId] ?? 'Untitled'}`} disabled={frozen || busy || loading} onclick={event => openTabMenu(event, tab.noteId)}>···</button>
             <button type="button" class="tab-action" aria-label={`Close ${titles[tab.noteId] ?? 'Untitled'}`} disabled={frozen || busy || loading} onclick={() => runTab(() => closeNote(tab.noteId))}>×</button>
           </div>
         {/each}
+        <button type="button" class="tab-new-btn" title="New Note (Ctrl+N)" disabled={loading || frozen || busy || !!startupError} onclick={() => runTab(newNote)}>＋</button>
       </div>
       <div bind:this={tabMenu} popover class="command-menu" style:left={`${menuX}px`} style:top={`${menuY}px`} aria-label="Tab actions">
         <button type="button" disabled={frozen || busy || loading} onclick={() => tabAction('rename')}>Rename…</button>
@@ -805,7 +881,9 @@
       {/if}
       {#if findVisible}
         <form class="find-bar" onsubmit={find}>
-          <label for="find">Find</label><input id="find" onkeydown={event => { if (event.key === 'Escape') { event.preventDefault(); findVisible = false; view?.focus(); } }} placeholder="Find in note…" bind:value={query} disabled={loading || frozen || inserting || busy || !session.activeNoteId || !!startupError} />
+          <label for="find" class="sr-only">Find in note</label>
+          <svg class="w-3.5 h-3.5 text-neutral-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg>
+          <input id="find" onkeydown={event => { if (event.key === 'Escape') { event.preventDefault(); findVisible = false; view?.focus(); } }} placeholder="Find in note…" bind:value={query} disabled={loading || frozen || inserting || busy || !session.activeNoteId || !!startupError} />
           <button type="submit" disabled={loading || frozen || inserting || busy || !session.activeNoteId || !!startupError}>Find next</button>
           <button type="button" aria-label="Close find" onclick={() => { findVisible = false; view?.focus(); }}>×</button>
         </form>
@@ -813,7 +891,29 @@
 
         <div id="note-panel" role="tabpanel" tabindex="0" aria-label="Active note" class="relative min-h-0 min-w-0 flex-1">
           <div class="h-full" class:hidden={!session.activeNoteId} bind:this={host}></div>
-          {#if !loading && !startupError && !session.activeNoteId}<div class="flex h-full flex-col items-center justify-center gap-3"><p>All tabs closed. Your notes are preserved.</p><button type="button" disabled={frozen || busy} onclick={() => runTab(newNote)}>Create a note</button><p class="text-xs">Open a note from the sidebar or reopen the last closed tab.</p></div>{/if}
+          {#if !loading && !startupError && !session.activeNoteId}
+            <div class="empty-workspace">
+              <img class="empty-logo" src="/app-icon.png" alt="Simple Note" />
+              <h1 class="empty-title">Simple Note</h1>
+              <p class="empty-desc">Fast, local-first scratchpad for developers. Everything saves automatically.</p>
+              <div class="empty-actions">
+                <button type="button" class="header-btn header-btn-primary px-4 py-2 text-xs" disabled={frozen || busy} onclick={() => runTab(newNote)}>
+                  ＋ Create a new note
+                </button>
+                <button type="button" class="header-btn px-4 py-2 text-xs border border-[#2b2d39] bg-[#161720]" disabled={frozen || busy} onclick={() => showSidebarPanel('explorer')}>
+                  Open Explorer
+                </button>
+              </div>
+              <div class="empty-shortcuts">
+                <div class="empty-shortcut-row"><span>New note</span><kbd>Ctrl+N</kbd></div>
+                <div class="empty-shortcut-row"><span>Find in note</span><kbd>Ctrl+F</kbd></div>
+                <div class="empty-shortcut-row"><span>Search all</span><kbd>Ctrl+Shift+F</kbd></div>
+                <div class="empty-shortcut-row"><span>Toggle Explorer</span><kbd>Ctrl+Shift+E</kbd></div>
+                <div class="empty-shortcut-row"><span>Paste screenshot</span><kbd>Ctrl+V</kbd></div>
+                <div class="empty-shortcut-row"><span>Toggle wrap</span><kbd>Alt+Z</kbd></div>
+              </div>
+            </div>
+          {/if}
         </div>
     </div>
   </div>
@@ -827,11 +927,16 @@
     {/if}
   </div>
   <footer class="status-bar">
-    <span role="status" aria-live="polite">{loading ? 'Loading notes…' : frozen ? 'Finishing current work…' : startupError ? 'Notes unavailable' : saveStatus === 'Error' ? 'Save failed — retry or export recovery' : saveStatus}</span>
+    <div class="status-item">
+      <span class="save-dot" class:saved={saveStatus === 'Saved' && !saveError} class:saving={saveStatus === 'Saving' && !saveError} class:error={saveStatus === 'Error' || !!saveError}></span>
+      <span role="status" aria-live="polite">{loading ? 'Loading notes…' : frozen ? 'Finishing current work…' : startupError ? 'Notes unavailable' : saveStatus === 'Error' ? 'Save failed — retry or export recovery' : saveStatus}</span>
+    </div>
     {#if notice}<span class="status-notice" role="status">{notice}</span>{/if}
     <fieldset class="status-tools" disabled={loading || frozen || inserting || busy || !session.activeNoteId || !!startupError} aria-label="Editor preferences">
       <button type="button" aria-pressed={wrap} onclick={toggleWrap}>Wrap: {wrap ? 'On' : 'Off'}</button>
       <label><span class="sr-only">Language</span><select aria-label="Note language" bind:value={language} onchange={changeLanguage}>{#each Object.entries(languageNames) as [value, name]}<option {value}>{name}</option>{/each}</select></label>
+      <span class="text-[#4b5563]">|</span>
+      <span class="text-[10px] font-mono text-neutral-400 px-1">UTF-8</span>
     </fieldset>
   </footer>
 </main>

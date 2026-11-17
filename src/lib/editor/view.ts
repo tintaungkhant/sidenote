@@ -1,8 +1,32 @@
 /** Browser-only image presentation; callers provide local attachment sources. */
 import { Decoration, EditorView, WidgetType } from '@codemirror/view';
+import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
+import { tags } from '@lezer/highlight';
 import { imageField, selectionText } from './state';
 import type { AttachmentId, ImageBlock } from './document';
 import { annotationSvg } from './annotations';
+
+/** Modern developer syntax highlighting theme inspired by Cursor & One Dark Pro. */
+export const cursorHighlightStyle = HighlightStyle.define([
+  { tag: tags.keyword, color: '#c678dd', fontWeight: 'bold' },
+  { tag: [tags.name, tags.deleted, tags.character, tags.propertyName, tags.macroName], color: '#e06c75' },
+  { tag: [tags.function(tags.variableName), tags.labelName], color: '#61afef' },
+  { tag: [tags.color, tags.constant(tags.name), tags.standard(tags.name)], color: '#d19a66' },
+  { tag: [tags.definition(tags.name), tags.separator], color: '#e5c07b' },
+  { tag: [tags.typeName, tags.className, tags.number, tags.changed, tags.annotation, tags.modifier, tags.self, tags.namespace], color: '#e5c07b' },
+  { tag: [tags.operator, tags.operatorKeyword, tags.url, tags.escape, tags.regexp, tags.link, tags.special(tags.string)], color: '#56b6c2' },
+  { tag: [tags.meta, tags.comment], color: '#7f848e', fontStyle: 'italic' },
+  { tag: tags.strong, fontWeight: 'bold' },
+  { tag: tags.emphasis, fontStyle: 'italic' },
+  { tag: tags.strikethrough, textDecoration: 'line-through' },
+  { tag: tags.link, color: '#61afef', textDecoration: 'underline' },
+  { tag: tags.heading, fontWeight: 'bold', color: '#e06c75' },
+  { tag: [tags.atom, tags.bool, tags.special(tags.variableName)], color: '#d19a66' },
+  { tag: [tags.processingInstruction, tags.string, tags.inserted], color: '#98c379' },
+  { tag: tags.invalid, color: '#f44747' }
+]);
+
+export const cursorSyntaxExtension = syntaxHighlighting(cursorHighlightStyle);
 
 /** Copy or cut the selection, or current line when empty, without delegating marker-bearing text to CodeMirror. */
 function exportClipboard(event: ClipboardEvent, view: EditorView, cut: boolean): boolean {
@@ -32,6 +56,7 @@ class ImageWidget extends WidgetType {
     const button = document.createElement('button');
     button.type = 'button'; button.className = 'note-image-button';
     button.setAttribute('aria-label', 'Annotate image');
+    button.title = 'Click to open annotation editor';
     button.onclick = () => this.open(this.block);
     button.append(image, status);
     image.hidden = true;
@@ -90,17 +115,21 @@ export function imagePresentation(load: (id: AttachmentId) => Promise<Blob>, ope
       dragstart(event) { event.preventDefault(); return true; }
     }),
     EditorView.theme({
-      '&': { height: '100%', backgroundColor: '#1e1e1e', color: '#d4d4d4' },
-      '.cm-scroller': { overflow: 'auto', fontFamily: 'Consolas, Menlo, monospace', fontSize: '14px' },
-      '.cm-content': { padding: '12px 0', caretColor: '#ffffff' },
-      '.cm-gutters': { backgroundColor: '#1e1e1e', color: '#858585', border: 'none' },
-      '.cm-activeLine': { backgroundColor: '#ffffff08' },
-      '.cm-cursor': { borderLeftColor: '#ffffff' },
-      '&.cm-focused .cm-selectionBackground, .cm-selectionBackground': { backgroundColor: '#264f78' },
-      '.note-image-button': { position: 'relative', display: 'inline-block', maxWidth: '100%', padding: '0', border: '0', margin: '4px', verticalAlign: 'middle', lineHeight: '0' },
-      '.note-image': { display: 'block', maxWidth: '100%', maxHeight: '300px' },
+      '&': { height: '100%', backgroundColor: '#131418', color: '#e4e7ec' },
+      '.cm-scroller': { overflow: 'auto', fontFamily: '"JetBrains Mono", "Cascadia Code", "Fira Code", Menlo, Monaco, Consolas, monospace', fontSize: '13.5px', lineHeight: '1.65' },
+      '.cm-content': { padding: '16px 20px', caretColor: '#38bdf8' },
+      '.cm-gutters': { backgroundColor: '#131418', color: '#4b5563', borderRight: '1px solid #1f2128', paddingRight: '4px' },
+      '.cm-gutterElement': { paddingLeft: '10px', paddingRight: '10px' },
+      '.cm-activeLine': { backgroundColor: 'rgba(255, 255, 255, 0.025)' },
+      '.cm-activeLineGutter': { color: '#cbd5e1', backgroundColor: 'rgba(255, 255, 255, 0.04)' },
+      '.cm-cursor': { borderLeft: '2px solid #38bdf8' },
+      '&.cm-focused .cm-selectionBackground, .cm-selectionBackground': { backgroundColor: 'rgba(99, 102, 241, 0.3)' },
+      '&.cm-focused .cm-matchingBracket': { outline: '1px solid #38bdf8', backgroundColor: 'rgba(56, 189, 248, 0.15)' },
+      '.note-image-button': { position: 'relative', display: 'inline-block', maxWidth: '100%', padding: '0', border: '1px solid #282a35', borderRadius: '8px', overflow: 'hidden', margin: '8px 0', verticalAlign: 'middle', lineHeight: '0', backgroundColor: '#181920', boxShadow: '0 4px 20px rgba(0,0,0,0.3)', transition: 'all 0.15s ease', cursor: 'pointer' },
+      '.note-image-button:hover': { borderColor: '#6366f1', boxShadow: '0 6px 24px rgba(99, 102, 241, 0.25)' },
+      '.note-image': { display: 'block', maxWidth: '100%', maxHeight: '340px' },
       '.note-image[hidden], .note-image-status[hidden]': { display: 'none' },
-      '.note-image-status': { display: 'block', padding: '12px', lineHeight: '1.4', color: '#a0a0a0' }
+      '.note-image-status': { display: 'block', padding: '16px', lineHeight: '1.4', color: '#9ca3af', fontSize: '12px' }
     }, { dark: true })
   ];
 }
