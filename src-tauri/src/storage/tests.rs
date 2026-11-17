@@ -14,6 +14,8 @@ fn annotation_edit_restart() {
         {"kind":"pen","points":[{"x":0.25,"y":0.5},{"x":0.75,"y":1.0}],"color":"#ff4444","width":4},
         {"kind":"highlighter","points":[{"x":0.0,"y":0.5},{"x":1.0,"y":0.5}],"color":"#ffff00","width":16},
         {"kind":"arrow","points":[{"x":0.0,"y":0.0},{"x":1.0,"y":1.0}],"color":"#3399ff","width":2},
+        {"kind":"rectangle","points":[{"x":1.0,"y":1.0},{"x":0.0,"y":0.25}],"color":"#3399ff","width":2},
+        {"kind":"circle","points":[{"x":1.0,"y":1.0},{"x":0.0,"y":0.0}],"color":"#ff4444","width":2},
         {"kind":"text","x":0.5,"y":0.5,"text":"edited\ncaption","color":"#ffffff","fontSize":24}
     ]);
     if let Block::Image {
@@ -596,4 +598,28 @@ fn library_search_source_only() {
     }
     assert_eq!(store.browse_notes(false, "".into(), 0).unwrap().len(), 100);
     assert_eq!(store.browse_notes(false, "".into(), 100).unwrap().len(), 2);
+}
+
+/// Shape inputs must retain their two-corner geometry at the IPC boundary.
+#[test]
+fn shape_validation() {
+    for kind in ["rectangle", "circle"] {
+        for points in [
+            serde_json::json!([]),
+            serde_json::json!([{"x":0,"y":0}]),
+            serde_json::json!([{"x":0,"y":0},{"x":1,"y":1},{"x":0,"y":1}]),
+            serde_json::json!([{"x":0,"y":0},{"x":2,"y":2}]),
+        ] {
+            let annotation: Annotation = serde_json::from_value(serde_json::json!({
+                "kind":kind,"points":points,"color":"#ff4444","width":2
+            }))
+            .unwrap();
+            assert!(validate_annotation(&annotation, 1, 1).is_err());
+        }
+    }
+    let circle: Annotation = serde_json::from_value(serde_json::json!({
+        "kind":"circle","points":[{"x":0,"y":0},{"x":1,"y":0.5}],"color":"#ff4444","width":2
+    }))
+    .unwrap();
+    assert!(validate_annotation(&circle, 1, 1).is_err());
 }

@@ -40,3 +40,28 @@ The attempted standalone block-widget changes were reverted at the user's reques
 Known limitation: after Enter immediately following an image, an empty second line can overlap the image until text is entered. This is the fallback explicitly accepted by the user. No further image-layout change is included. Existing image source, annotations, and note data are unchanged.
 
 Rollback verification: `bun run check` reports zero errors/warnings; `bun test` passes 38 tests; `git diff --check` passes. The image presentation file matches HEAD exactly. No browser or visual checks were performed.
+
+## Image editor presentation follow-up
+
+Replaced the flat annotation toolbar with a titled header and separate output actions, a left drawing-tool rail with SVG icons and shortcut hints, and a properties bar with named color swatches, stroke width, and history controls. The scrollable canvas uses a distinct background and image shadow. Selected text has a dedicated editing strip; save feedback and original image dimensions appear in the footer. Narrow-window styles retain all controls.
+
+Existing pointer coordinates, annotation history, immediate persistence, image output, modal keyboard handling, and object-URL ownership are reused. No dependencies or note-image layout changes were added. Reviewed comments for presentation ownership and coordinate invariants.
+
+Verification: `bun run check` reports zero errors/warnings; `bun test` passes 38 tests; `bun run build` and `git diff --check` pass. Existing large editor chunk warning remains. No browser or visual tests were performed; rendered layout and native annotation interactions remain unverified.
+
+
+## In-place captions and object handles
+
+Removed the white drop-shadow selection effect; highlighter opacity and annotation colors remain unchanged. Selected objects now show a blue box, a move handle, and a bottom-right proportional resize handle. Resizing scales path geometry/stroke width or text font size within existing native limits, with immutable previews and one completed operation in annotation history. Selection chrome never enters normal inline rendering or PNG output.
+
+Text placement creates and focuses a native textarea at the caption's source-image coordinates inside SVG foreignObject. Double-clicking existing text reopens it; keyboard users can select a caption with Tab and press Enter. Escape returns from caption editing to canvas selection. Multiline text, native caret/selection/IME, and the existing 64 KiB text validation are retained; each input continues immediate persistence. The top text box is removed. Reviewed comments for focus, coordinate ownership, source immutability, output exclusion, and native limits.
+
+Verification: `bun run check` passes with zero errors/warnings; `bun test` passes 41 tests (176 assertions), including new selection/output separation, geometry/style limits, source immutability, and empty/multiline caption bounds. `bun run build` and `git diff --check` pass; the existing large editor chunk warning remains. No browser or visual tests were run. Native foreignObject focus, IME interaction, double-click behavior, pointer handles, and rendered alignment remain unverified. Text selection bounds use an approximate font-width estimate rather than measured glyph bounds; resizing is proportional from the top-left, not free text-box reflow.
+
+### Caption width and double-click correction
+
+The in-place textarea now uses the remaining image width from its anchor, rather than growing from an estimated character count. Selection chrome is hidden while typing so its approximate bounds cannot appear as growing right padding. Caption height still follows explicit newline count; horizontal overflow remains native when text exceeds the image boundary.
+
+Pointer capture and SVG selection redraws can retarget native double-click events to the canvas. Completed caption clicks now recognize a same-object pair within 500 ms and 4 CSS pixels before relying on the native double-click fallback. Selection-only clicks do not commit a move or redraw geometry. Native double-click also falls back to the currently selected caption. Reviewed comments for click routing, undo preservation, and internal sizing.
+
+Checks: `bun run check` passes with zero errors/warnings; `bun test` passes 41 tests (177 assertions), including selection chrome suppression during text entry; `bun run build` and `git diff --check` pass. No browser or visual checks. Actual pointer timing and native text-input interactions remain unverified.

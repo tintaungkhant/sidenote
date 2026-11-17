@@ -68,6 +68,16 @@ pub enum Annotation {
         color: String,
         width: f64,
     },
+    Rectangle {
+        points: Vec<Point>,
+        color: String,
+        width: f64,
+    },
+    Circle {
+        points: Vec<Point>,
+        color: String,
+        width: f64,
+    },
     Text {
         x: f64,
         y: f64,
@@ -174,6 +184,17 @@ fn invalid(message: &str) -> StoreError {
 }
 /// Bound annotation coordinates and styles; original-image dimensions are checked separately.
 fn validate_annotation(annotation: &Annotation, width: u32, height: u32) -> Result<()> {
+    if let Annotation::Rectangle { points, .. } | Annotation::Circle { points, .. } = annotation {
+        if points.len() != 2 {
+            return Err(invalid("Shapes require exactly two corners"));
+        }
+        if matches!(annotation, Annotation::Circle { .. })
+            && ((points[1].x - points[0].x).abs() - (points[1].y - points[0].y).abs()).abs()
+                > 0.000001
+        {
+            return Err(invalid("Circle bounds must have equal sides"));
+        }
+    }
     let point_ok = |x: f64, y: f64| {
         x.is_finite()
             && y.is_finite()
@@ -201,6 +222,16 @@ fn validate_annotation(annotation: &Annotation, width: u32, height: u32) -> Resu
             width,
         }
         | Annotation::Highlighter {
+            points,
+            color,
+            width,
+        }
+        | Annotation::Rectangle {
+            points,
+            color,
+            width,
+        }
+        | Annotation::Circle {
             points,
             color,
             width,

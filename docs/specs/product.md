@@ -54,7 +54,8 @@ The following details are first-release design defaults, chosen to make that dir
 - Resize only the displayed image to fit editor width. Preserve original pixels.
 - Annotation tools: freehand pen, translucent highlighter, arrow, and text box; a small fixed color palette and stroke-width choices are sufficient.
 - Select, move, and delete annotations. Text boxes remain editable. Provide undo/redo during annotation editing.
-- Each completed stroke, move, or text edit is saved automatically. There is no annotation Save or Apply button.
+- Text captions accept typing directly at placement. Double-click or select and press Enter to edit again; Escape finishes text editing before closing the image editor. Selected objects show a bounding box with move and bottom-right proportional resize handles. Selection chrome is excluded from copied/exported images.
+- Each completed stroke, move, resize, or text edit is saved automatically. There is no annotation Save or Apply button.
 - Escape exits annotation view. Completed edits remain; an unfinished pointer gesture can be canceled.
 - Keep source image unchanged and annotations editable after restart.
 - Copy Image and Export PNG produce a flattened image including annotations. Export asks for a destination because it creates a separate file.

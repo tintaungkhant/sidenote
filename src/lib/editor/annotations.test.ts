@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { undo, redo } from '@codemirror/commands';
-import { AnnotationHistory, annotationKey, annotationSvg, imagePoint, translate } from './annotations';
+import { AnnotationHistory, annotationKey, annotationSvg, imagePoint, translate, annotationBounds, resizeAnnotation, shapePoints } from './annotations';
 import { annotateImage, createNoteState, imageField } from './state';
 import { decodeDocument, encodeDocument, type Annotation, type ImageBlock } from './document';
 
@@ -68,4 +68,64 @@ test('one original has independent placement annotations, serialized geometry, a
   expect(state.field(imageField)[0].block.annotations).toEqual([]);
   expect(redo(target)).toBe(true);
   expect(state.field(imageField)[0].block.annotations).toEqual([text]);
+});
+
+
+test('selection uses a box and resize handle without glow or exported selection chrome', () => {
+  const focused = annotationSvg([text], 0);
+  expect(focused).not.toContain('drop-shadow');
+  expect(focused).toContain('data-resize="true"');
+  expect(focused).toContain('vector-effect="non-scaling-stroke"');
+  const exported = annotationSvg([text]);
+  expect(exported).not.toContain('data-resize');
+  expect(exported).not.toContain('#75beff');
+  expect(annotationSvg([text], 0, 0)).not.toContain('<text');
+  expect(annotationSvg([text], 0, 0)).not.toContain('data-resize');
+});
+
+test('resize preserves geometry proportions, native bounds, and immutable source', () => {
+  const pen: Annotation = { kind: 'pen', points: [{ x: 10, y: 20 }, { x: 50, y: 60 }], color: '#ff0000', width: 4 };
+  expect(resizeAnnotation(pen, { x: 90, y: 100 }, 200, 200)).toMatchObject({ width: 8, points: [{ x: 10, y: 20 }, { x: 90, y: 100 }] });
+  const clamped = resizeAnnotation(pen, { x: 1000, y: 1000 }, 100, 100);
+  expect(annotationBounds(clamped)).toEqual({ left: 10, top: 20, right: 90, bottom: 100 });
+  expect(pen.width).toBe(4);
+  const dot = { ...pen, points: [{ x: 100, y: 100 }] };
+  const small = resizeAnnotation(dot, { x: 0, y: 0 }, 100, 100);
+  expect(small.kind !== 'text' && small.width > 0).toBe(true);
+});
+
+test('text bounds include empty and multiline captions; resizing changes font without changing content', () => {
+  const empty = { ...text, text: '' };
+  expect(annotationBounds(empty).right).toBeGreaterThan(empty.x);
+  expect(annotationBounds(text).bottom).toBe(text.y + text.fontSize * 2 * 1.2);
+  const resized = resizeAnnotation(text, { x: 1000, y: 1000 }, 2000, 2000);
+  expect(resized.kind === 'text' && resized.text).toBe(text.text);
+  expect(resized.kind === 'text' && resized.fontSize).toBeGreaterThan(text.fontSize);
+  expect(text.fontSize).toBe(24);
+});
+
+test('rectangle and circle drags render, move, and resize in all directions', () => {
+  for (const dx of [-60, 60]) for (const dy of [-40, 40]) {
+    for (const kind of ['rectangle', 'circle'] as const) {
+      const points = shapePoints(kind, { x: 100, y: 100 }, { x: 100 + dx, y: 100 + dy });
+      const shape: Annotation = { kind, points, color: '#ff0000', width: 4 };
+      const bounds = annotationBounds(shape);
+      expect(bounds.right - bounds.left).toBe(kind === 'circle' ? 40 : 60);
+      expect(bounds.bottom - bounds.top).toBe(40);
+      const svg = annotationSvg([shape]);
+      expect(svg).toContain(kind === 'circle' ? '<circle ' : '<rect ');
+      expect(svg).toContain('fill="none"');
+      expect(svg).not.toContain('data-resize');
+      const moved = translate(shape, 10, 10, 500, 500);
+      expect(annotationBounds(moved).left).toBe(bounds.left + 10);
+      const resized = resizeAnnotation(shape, { x: bounds.left + 120, y: bounds.top + 120 }, 500, 500);
+      const b = annotationBounds(resized);
+      if (kind === 'circle') expect(b.right - b.left).toBeCloseTo(b.bottom - b.top);
+      expect(shape.points).toEqual(points);
+    }
+  }
+  const key = { ctrlKey: false, metaKey: false, shiftKey: false, isComposing: false };
+  expect(annotationKey({ ...key, key: 'r' }, false)).toBe('rectangle');
+  expect(annotationKey({ ...key, key: 'c' }, false)).toBe('circle');
+  expect(annotationKey({ ...key, key: 'c' }, true)).toBeUndefined();
 });
