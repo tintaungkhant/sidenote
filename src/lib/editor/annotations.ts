@@ -2,13 +2,6 @@ import type { Annotation } from './document';
 export type Point = { x: number; y: number };
 export type Tool = 'select' | 'pen' | 'highlighter' | 'arrow' | 'rectangle' | 'circle' | 'text';
 
-/** Two-corner shapes replace the endpoint; circles retain equal sides in every drag direction. */
-export function shapePoints(kind: 'arrow' | 'rectangle' | 'circle', start: Point, end: Point): readonly Point[] {
-  if (kind !== 'circle') return [start, end];
-  const side = Math.min(Math.abs(end.x - start.x), Math.abs(end.y - start.y));
-  return [start, { x: start.x + Math.sign(end.x - start.x) * side, y: start.y + Math.sign(end.y - start.y) * side }];
-}
-
 /** Focused-view history contains completed immutable operations only; a new edit clears redo. */
 export class AnnotationHistory {
   private past: (readonly Annotation[])[] = [];
@@ -78,7 +71,7 @@ export function annotationSvg(annotations: readonly Annotation[], selected = -1,
       const b = annotationBounds(a), w = b.right - b.left, h = b.bottom - b.top;
       shape = a.kind === 'rectangle'
         ? `<rect x="${b.left}" y="${b.top}" width="${w}" height="${h}" fill="none" ${style}/>`
-        : `<circle cx="${b.left + w / 2}" cy="${b.top + h / 2}" r="${Math.min(w, h) / 2}" fill="none" ${style}/>`;
+        : `<ellipse cx="${b.left + w / 2}" cy="${b.top + h / 2}" rx="${w / 2}" ry="${h / 2}" fill="none" ${style}/>`;
     } else {
       shape = `<polyline points="${a.points.map(p => `${p.x},${p.y}`).join(' ')}" fill="none" ${style} stroke-linecap="round" stroke-linejoin="round" opacity="${a.kind === 'highlighter' ? 0.35 : 1}"/>`;
       if (a.kind === 'arrow' && a.points.length > 1) {

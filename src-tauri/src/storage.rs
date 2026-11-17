@@ -188,12 +188,6 @@ fn validate_annotation(annotation: &Annotation, width: u32, height: u32) -> Resu
         if points.len() != 2 {
             return Err(invalid("Shapes require exactly two corners"));
         }
-        if matches!(annotation, Annotation::Circle { .. })
-            && ((points[1].x - points[0].x).abs() - (points[1].y - points[0].y).abs()).abs()
-                > 0.000001
-        {
-            return Err(invalid("Circle bounds must have equal sides"));
-        }
     }
     let point_ok = |x: f64, y: f64| {
         x.is_finite()

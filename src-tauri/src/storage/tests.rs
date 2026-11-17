@@ -15,7 +15,7 @@ fn annotation_edit_restart() {
         {"kind":"highlighter","points":[{"x":0.0,"y":0.5},{"x":1.0,"y":0.5}],"color":"#ffff00","width":16},
         {"kind":"arrow","points":[{"x":0.0,"y":0.0},{"x":1.0,"y":1.0}],"color":"#3399ff","width":2},
         {"kind":"rectangle","points":[{"x":1.0,"y":1.0},{"x":0.0,"y":0.25}],"color":"#3399ff","width":2},
-        {"kind":"circle","points":[{"x":1.0,"y":1.0},{"x":0.0,"y":0.0}],"color":"#ff4444","width":2},
+        {"kind":"circle","points":[{"x":1.0,"y":1.0},{"x":0.0,"y":0.5}],"color":"#ff4444","width":2},
         {"kind":"text","x":0.5,"y":0.5,"text":"edited\ncaption","color":"#ffffff","fontSize":24}
     ]);
     if let Block::Image {
@@ -621,5 +621,5 @@ fn shape_validation() {
         "kind":"circle","points":[{"x":0,"y":0},{"x":1,"y":0.5}],"color":"#ff4444","width":2
     }))
     .unwrap();
-    assert!(validate_annotation(&circle, 1, 1).is_err());
+    assert!(validate_annotation(&circle, 1, 1).is_ok());
 }

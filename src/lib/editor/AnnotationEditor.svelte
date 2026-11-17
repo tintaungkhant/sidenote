@@ -2,7 +2,7 @@
   import { onMount, untrack, tick } from 'svelte';
   import { errorMessage } from '$lib/autosave';
   import type { Annotation, ImageBlock } from './document';
-  import { AnnotationHistory, annotationKey, annotationSvg, imagePoint, translate, annotationBounds, resizeAnnotation, shapePoints, type Point, type Tool } from './annotations';
+  import { AnnotationHistory, annotationKey, annotationSvg, imagePoint, translate, annotationBounds, resizeAnnotation, type Point, type Tool } from './annotations';
   let { block, blob, status, onchange, onclose, onoutput }: { block: ImageBlock; blob: Blob; status: string; onchange: (annotations: readonly Annotation[]) => void; onclose: () => void;
     onoutput: (action: 'copy' | 'export', annotations: readonly Annotation[], width: number, height: number) => Promise<string> } = $props();
   let annotations = $state.raw<readonly Annotation[]>(untrack(() => block.annotations));
@@ -20,7 +20,7 @@
   let validation = $state('');
   let outputBusy = $state(false), outputMessage = $state('');
   const tools: Tool[] = ['select', 'pen', 'highlighter', 'arrow', 'rectangle', 'circle', 'text'];
-  const toolNames: Record<Tool, string> = { select: 'Select', pen: 'Pen', highlighter: 'Highlight', arrow: 'Arrow', rectangle: 'Rectangle', circle: 'Circle', text: 'Text' };
+  const toolNames: Record<Tool, string> = { select: 'Select', pen: 'Pen', highlighter: 'Highlight', arrow: 'Arrow', rectangle: 'Rectangle', circle: 'Ellipse', text: 'Text' };
   const toolKeys: Record<Tool, string> = { select: 'V', pen: 'P', highlighter: 'H', arrow: 'A', rectangle: 'R', circle: 'C', text: 'T' };
   const toolIcons: Record<Tool, string> = {
     select: 'M5 3l13 9-6 1-3 6z', pen: 'M4 20l4-1L20 7l-4-4L4 15zM14 5l4 4',
@@ -101,7 +101,7 @@
     if (gesture.original) gesture = { ...gesture, draft: gesture.resize ? resizeAnnotation(gesture.original, p, imageWidth, imageHeight) : translate(gesture.original, p.x - gesture.start.x, p.y - gesture.start.y, imageWidth, imageHeight) };
     else if (gesture.draft && gesture.draft.kind !== 'text') {
       const a = gesture.draft;
-      gesture = { ...gesture, draft: { ...a, points: a.kind === 'arrow' || a.kind === 'rectangle' || a.kind === 'circle' ? shapePoints(a.kind, gesture.start, p) : a.points.length < 100000 ? [...a.points, p] : a.points } };
+      gesture = { ...gesture, draft: { ...a, points: a.kind === 'arrow' || a.kind === 'rectangle' || a.kind === 'circle' ? [gesture.start, p] : a.points.length < 100000 ? [...a.points, p] : a.points } };
     }
   }
   /** Persist only a completed gesture, releasing capture even when it makes no changes. */

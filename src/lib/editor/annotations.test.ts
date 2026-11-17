@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { undo, redo } from '@codemirror/commands';
-import { AnnotationHistory, annotationKey, annotationSvg, imagePoint, translate, annotationBounds, resizeAnnotation, shapePoints } from './annotations';
+import { AnnotationHistory, annotationKey, annotationSvg, imagePoint, translate, annotationBounds, resizeAnnotation } from './annotations';
 import { annotateImage, createNoteState, imageField } from './state';
 import { decodeDocument, encodeDocument, type Annotation, type ImageBlock } from './document';
 
@@ -104,23 +104,28 @@ test('text bounds include empty and multiline captions; resizing changes font wi
   expect(text.fontSize).toBe(24);
 });
 
-test('rectangle and circle drags render, move, and resize in all directions', () => {
+test('rectangle and ellipse drags render, move, and resize in all directions', () => {
   for (const dx of [-60, 60]) for (const dy of [-40, 40]) {
     for (const kind of ['rectangle', 'circle'] as const) {
-      const points = shapePoints(kind, { x: 100, y: 100 }, { x: 100 + dx, y: 100 + dy });
+      const points = [{ x: 100, y: 100 }, { x: 100 + dx, y: 100 + dy }];
       const shape: Annotation = { kind, points, color: '#ff0000', width: 4 };
       const bounds = annotationBounds(shape);
-      expect(bounds.right - bounds.left).toBe(kind === 'circle' ? 40 : 60);
+      expect(bounds.right - bounds.left).toBe(60);
       expect(bounds.bottom - bounds.top).toBe(40);
       const svg = annotationSvg([shape]);
-      expect(svg).toContain(kind === 'circle' ? '<circle ' : '<rect ');
+      expect(svg).toContain(kind === 'circle' ? '<ellipse ' : '<rect ');
       expect(svg).toContain('fill="none"');
       expect(svg).not.toContain('data-resize');
       const moved = translate(shape, 10, 10, 500, 500);
       expect(annotationBounds(moved).left).toBe(bounds.left + 10);
       const resized = resizeAnnotation(shape, { x: bounds.left + 120, y: bounds.top + 120 }, 500, 500);
       const b = annotationBounds(resized);
-      if (kind === 'circle') expect(b.right - b.left).toBeCloseTo(b.bottom - b.top);
+      expect((b.right - b.left) / (b.bottom - b.top)).toBeCloseTo(1.5);
+      if (kind === 'circle') {
+        expect(svg).toContain('rx="30" ry="20"');
+        const round = { ...shape, points: [{ x: 10, y: 10 }, { x: 50, y: 50 }] };
+        expect(annotationSvg([round])).toContain('rx="20" ry="20"');
+      }
       expect(shape.points).toEqual(points);
     }
   }
