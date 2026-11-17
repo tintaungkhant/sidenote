@@ -19,28 +19,42 @@ function exportClipboard(event: ClipboardEvent, view: EditorView, cut: boolean):
 
 class ImageWidget extends WidgetType {
   constructor(readonly block: ImageBlock, readonly load: (id: AttachmentId) => Promise<Blob>, readonly open: (block: ImageBlock) => void) { super(); }
-  private release?: () => void;
+  private releases = new WeakMap<HTMLElement, () => void>();
   /** Stable identity permits widget reuse across text changes. */
   eq(other: ImageWidget): boolean { return this.block === other.block && this.load === other.load && this.open === other.open; }
   /** Load only mounted widgets; each widget owns and revokes its object URL. */
   toDOM(view: EditorView): HTMLElement {
     const image = document.createElement('img');
+    const status = document.createElement('span');
+    status.className = 'note-image-status';
+    status.textContent = 'Loading image…';
+    status.setAttribute('role', 'status');
     const button = document.createElement('button');
     button.type = 'button'; button.className = 'note-image-button';
     button.setAttribute('aria-label', 'Annotate image');
     button.onclick = () => this.open(this.block);
-    button.append(image);
-    image.alt = 'Loading note image';
+    button.append(image, status);
+    image.hidden = true;
+    image.alt = 'Note image';
     image.className = 'note-image';
     image.draggable = false;
     let alive = true;
     let url: string | undefined;
-    this.release = () => { alive = false; image.removeAttribute('src'); if (url) URL.revokeObjectURL(url); };
+    this.releases.set(button, () => { alive = false; image.onload = image.onerror = null; image.removeAttribute('src'); if (url) URL.revokeObjectURL(url); });
+    const unavailable = () => {
+      if (!alive) return;
+      image.hidden = true;
+      status.hidden = false;
+      status.textContent = 'Image unavailable; reopen the tab to retry';
+      view.requestMeasure();
+    };
     void this.load(this.block.attachmentId).then(blob => {
       if (!alive) return;
       url = URL.createObjectURL(blob);
       image.onload = () => {
         if (!alive) return;
+        image.hidden = false;
+        status.hidden = true;
         const overlay = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
         overlay.setAttribute('viewBox', `0 0 ${image.naturalWidth} ${image.naturalHeight}`);
         overlay.setAttribute('aria-hidden', 'true');
@@ -48,13 +62,13 @@ class ImageWidget extends WidgetType {
         overlay.innerHTML = annotationSvg(this.block.annotations);
         button.append(overlay); view.requestMeasure();
       };
+      image.onerror = unavailable;
       image.src = url;
-      image.alt = 'Note image';
-    }).catch(() => { if (alive) { image.alt = 'Image unavailable; reopen the tab to retry'; view.requestMeasure(); } });
+    }).catch(unavailable);
     return button;
   }
   /** Dropped viewport widgets release decoded image resources, including late asynchronous loads. */
-  destroy(): void { this.release?.(); }
+  destroy(dom: HTMLElement): void { this.releases.get(dom)?.(); this.releases.delete(dom); }
 }
 
 /** Decorate sidecar positions only, preserving literal placeholder characters. */
@@ -84,7 +98,9 @@ export function imagePresentation(load: (id: AttachmentId) => Promise<Blob>, ope
       '.cm-cursor': { borderLeftColor: '#ffffff' },
       '&.cm-focused .cm-selectionBackground, .cm-selectionBackground': { backgroundColor: '#264f78' },
       '.note-image-button': { position: 'relative', display: 'inline-block', maxWidth: '100%', padding: '0', border: '0', margin: '4px', verticalAlign: 'middle', lineHeight: '0' },
-      '.note-image': { display: 'block', maxWidth: '100%', maxHeight: '300px' }
+      '.note-image': { display: 'block', maxWidth: '100%', maxHeight: '300px' },
+      '.note-image[hidden], .note-image-status[hidden]': { display: 'none' },
+      '.note-image-status': { display: 'block', padding: '12px', lineHeight: '1.4', color: '#a0a0a0' }
     }, { dark: true })
   ];
 }
