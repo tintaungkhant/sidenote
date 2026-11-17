@@ -91,7 +91,7 @@ test('resize preserves geometry proportions, native bounds, and immutable source
   expect(pen.width).toBe(4);
   const dot = { ...pen, points: [{ x: 100, y: 100 }] };
   const small = resizeAnnotation(dot, { x: 0, y: 0 }, 100, 100);
-  expect(small.kind !== 'text' && small.width > 0).toBe(true);
+  expect(small.kind !== 'text' && small.kind !== 'caption' && small.width > 0).toBe(true);
 });
 
 test('text bounds include empty and multiline captions; resizing changes font without changing content', () => {
@@ -133,4 +133,17 @@ test('rectangle and ellipse drags render, move, and resize in all directions', (
   expect(annotationKey({ ...key, key: 'r' }, false)).toBe('rectangle');
   expect(annotationKey({ ...key, key: 'c' }, false)).toBe('circle');
   expect(annotationKey({ ...key, key: 'c' }, true)).toBeUndefined();
+});
+
+
+test('image captions render at the bottom, escape content, and stay fixed during transforms', () => {
+  const caption: Annotation = { kind: 'caption', text: '<caption> & hello' };
+  const svg = annotationSvg([caption], 0, -1, 800, 600);
+  expect(svg).toContain('fill-opacity="0.7"');
+  expect(svg).toContain('&lt;caption&gt; &amp; hello');
+  expect(svg).toContain('y="547.2"');
+  expect(svg).not.toContain('data-resize');
+  expect(annotationSvg([caption], 0, 0, 800, 600)).toBe('');
+  expect(translate(caption, 10, 20, 800, 600)).toEqual(caption);
+  expect(resizeAnnotation(caption, { x: 10, y: 20 }, 800, 600)).toEqual(caption);
 });

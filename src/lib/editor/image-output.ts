@@ -12,7 +12,7 @@ export function validateOutputSize(width: number, height: number): void {
 /** Render exactly the annotation-view vectors without selection decorations or unfinished gestures. */
 export function outputSvg(annotations: readonly Annotation[], width: number, height: number): string {
   validateOutputSize(width, height);
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${annotationSvg(annotations)}</svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${annotationSvg(annotations, -1, -1, width, height)}</svg>`;
 }
 
 /** Compose onto transparent pixels with ordinary source-over alpha, original first and annotations last. */

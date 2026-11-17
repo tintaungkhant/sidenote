@@ -44,3 +44,11 @@ test('invalid or oversized output is rejected before any drawing', () => {
   }
   expect(() => validateOutputSize(8000, 5000)).not.toThrow();
 });
+
+
+test('export includes the caption band at original image dimensions', () => {
+  const svg = outputSvg([{ kind: 'caption', text: 'Saved caption' }], 800, 600);
+  expect(svg).toContain('y="547.2" width="800"');
+  expect(svg).toContain('Saved caption');
+  expect(svg).not.toContain('data-resize');
+});

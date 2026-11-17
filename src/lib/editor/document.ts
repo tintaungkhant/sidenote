@@ -2,6 +2,7 @@
 export type AttachmentId = string & { readonly attachmentId: unique symbol };
 export type ImageId = string & { readonly imageId: unique symbol };
 export type Annotation =
+  | { kind: 'caption'; text: string }
   | { kind: 'pen' | 'highlighter' | 'arrow' | 'rectangle' | 'circle'; points: readonly { x: number; y: number }[]; color: string; width: number }
   | { kind: 'text'; x: number; y: number; text: string; color: string; fontSize: number };
 export type ImageBlock = { kind: 'image'; id: ImageId; attachmentId: AttachmentId; annotations: readonly Annotation[] };

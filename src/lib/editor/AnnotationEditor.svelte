@@ -15,6 +15,11 @@
   let captionClick: { index: number; time: number; x: number; y: number } | undefined;
   let pointerOrigin: { x: number; y: number } | undefined;
   let textDraft = $state('');
+  let editingCaption = $state(false);
+  let captionInput = $state<HTMLTextAreaElement>();
+  let captionDraft = $state('');
+  const captionIndex = $derived(annotations.findIndex(a => a.kind === 'caption'));
+  const hasCaption = $derived(captionIndex >= 0 && !!(annotations[captionIndex] as Extract<Annotation, { kind: 'caption' }>).text);
   let editingText = $state(false);
   let textInput = $state<HTMLTextAreaElement>();
   let validation = $state('');
@@ -39,7 +44,7 @@
   }
   /** Local history keeps annotation shortcuts independent of the note editor. */
   function history(redo = false) {
-    gesture = undefined; editingText = false;
+    gesture = undefined; editingText = false; editingCaption = false;
     const next = operations.step(redo);
     if (next === annotations) return;
     annotations = next; selected = -1; onchange(next);
@@ -54,6 +59,25 @@
     commit([...annotations, { kind: 'text', x: Math.min(p.x, Math.max(0, imageWidth - 24)), y: Math.min(p.y, Math.max(0, imageHeight - 30)), text: '', color, fontSize: 24 }]); select(annotations.length - 1);
     void beginTextEditing();
   }
+  async function openCaption() {
+    if (!imageWidth || outputBusy) return;
+    select(-1); gesture = undefined; tool = 'select';
+    captionDraft = captionIndex < 0 ? '' : (annotations[captionIndex] as Extract<Annotation, { kind: 'caption' }>).text;
+    editingCaption = true;
+    await tick(); captionInput?.focus();
+  }
+  function saveCaption() {
+    if (new TextEncoder().encode(captionDraft).length > 65536) {
+      validation = 'Caption is limited to 64 KiB.'; return;
+    }
+    validation = '';
+    if (captionIndex < 0) {
+      if (!captionDraft || annotations.length >= 10000) return;
+      commit([...annotations, { kind: 'caption', text: captionDraft }]);
+    } else if (captionDraft) {
+      commit(annotations.map((a, i) => i === captionIndex ? { kind: 'caption', text: captionDraft } : a));
+    } else commit(annotations.filter((_, i) => i !== captionIndex));
+  }
   /** Focus the caption at its image position; native text editing retains caret, selection, multiline input, and IME. */
   async function beginTextEditing() {
     if (annotations[selected]?.kind !== 'text' || outputBusy) return;
@@ -67,6 +91,7 @@
     const element = (event.target as Element).closest('[data-annotation]');
     if (outputBusy || editingText) return;
     const index = element ? Number(element.getAttribute('data-annotation')) : selected;
+    if (annotations[index]?.kind === 'caption') { void openCaption(); return; }
     if (annotations[index]?.kind !== 'text') return;
     select(index); void beginTextEditing();
   }
@@ -76,6 +101,9 @@
   /** Begin a captured gesture or create a keyboard-editable text object at the chosen image pixel. */
   function start(event: PointerEvent) {
     if (outputBusy || event.button !== 0 || !imageWidth || gesture || (event.target as Element).closest('textarea')) return;
+    const target = (event.target as Element).closest('[data-annotation]');
+    if (target && annotations[Number(target.getAttribute('data-annotation'))]?.kind === 'caption') return;
+    editingCaption = false;
     event.preventDefault(); surface.focus();
     const p = point(event);
     pointerOrigin = { x: event.clientX, y: event.clientY };
@@ -100,7 +128,7 @@
     if (!gesture || event.pointerId !== gesture.pointer) return;
     const p = point(event);
     if (gesture.original) gesture = { ...gesture, draft: gesture.resize ? resizeAnnotation(gesture.original, p, imageWidth, imageHeight) : translate(gesture.original, p.x - gesture.start.x, p.y - gesture.start.y, imageWidth, imageHeight) };
-    else if (gesture.draft && gesture.draft.kind !== 'text') {
+    else if (gesture.draft && gesture.draft.kind !== 'text' && gesture.draft.kind !== 'caption') {
       const a = gesture.draft;
       gesture = { ...gesture, draft: { ...a, points: a.kind === 'arrow' || a.kind === 'rectangle' || a.kind === 'circle' ? [gesture.start, p] : a.points.length < 100000 ? [...a.points, p] : a.points } };
     }
@@ -130,8 +158,17 @@
   function key(event: KeyboardEvent) {
     event.stopPropagation();
     if (outputBusy) { if (event.key !== 'Tab') event.preventDefault(); return; }
+    if (editingCaption && event.target === captionInput && event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      event.preventDefault(); editingCaption = false; surface.focus(); return;
+    }
+    if (editingCaption && event.key === 'Escape' && !event.isComposing) {
+      event.preventDefault(); editingCaption = false; surface.focus(); return;
+    }
     if (editingText && event.target === textInput && event.key === 'Escape' && !event.isComposing) {
       event.preventDefault(); editingText = false; surface.focus(); return;
+    }
+    if (!editingText && event.target === surface && event.key === 'Enter' && annotations[selected]?.kind === 'caption') {
+      event.preventDefault(); void openCaption(); return;
     }
     if (!editingText && event.target === surface && event.key === 'Enter' && annotations[selected]?.kind === 'text') {
       event.preventDefault(); void beginTextEditing(); return;
@@ -177,7 +214,7 @@
   <fieldset class="contents" disabled={outputBusy} aria-label="Annotation tools">
   <!-- Presentation groups reuse the same gesture, history, and immediate-save operations. -->
   <header class="annotation-header">
-    <div><h2>Image editor</h2><span class="subtitle">Draw, highlight, and add text</span></div>
+    <h2>Image editor</h2>
     <div class="output-actions">
       <button type="button" disabled={!imageWidth} onclick={() => output('copy')}>Copy image</button>
       <button type="button" disabled={!imageWidth} onclick={() => output('export')}>Export PNG</button>
@@ -193,9 +230,7 @@
         </button>
       {/each}
       <div class="tool-divider"></div>
-      <button type="button" disabled={!imageWidth} onclick={() => addText()}>＋ Add text</button>
-      <button class="delete-button" type="button" disabled={selected < 0} onclick={() => { commit(annotations.filter((_, i) => i !== selected)); select(-1); }}>Delete selected</button>
-      <p class="tool-hint">Select an annotation to move or delete it.</p>
+      <button type="button" disabled={!imageWidth || (!hasCaption && annotations.length >= 10000)} onclick={openCaption}>{hasCaption ? 'Edit caption' : '＋ Add caption'}</button>
     </aside>
     <section class="annotation-main" aria-label="Image canvas workspace">
       <div class="annotation-properties">
@@ -216,7 +251,7 @@
         <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
         <svg bind:this={surface} viewBox={`0 0 ${imageWidth} ${imageHeight}`} class="absolute inset-0 h-full w-full touch-none" tabindex="0" role="application" aria-label="Annotation canvas"
           ondblclick={editCaption} onpointerdown={start} onpointermove={move} onpointerup={finish} onpointercancel={() => { gesture = undefined; }} onlostpointercapture={() => { gesture = undefined; }}>
-          {@html annotationSvg(preview, selected, editingText ? selected : -1)}
+          {@html annotationSvg(preview, selected, editingText ? selected : editingCaption ? captionIndex : -1, imageWidth, imageHeight)}
           {#if editingText && annotations[selected]?.kind === 'text'}
             {@const caption = annotations[selected] as Extract<Annotation, { kind: 'text' }>}
             {@const bounds = annotationBounds(caption)}
@@ -232,11 +267,19 @@
           {/if}
         </svg>
       {/if}
+          {#if editingCaption}
+            <div class="image-caption-overlay">
+              <div class="image-caption-field">
+                <span aria-hidden="true">{captionDraft || 'Add a caption…'}{'\n'}</span>
+                <textarea bind:this={captionInput} aria-label="Image caption" placeholder="Add a caption…" rows="1" bind:value={captionDraft} oninput={saveCaption} onblur={() => { editingCaption = false; }}></textarea>
+              </div>
+            </div>
+          {/if}
         </div>
       </div>
     </section>
   </div>
-  <footer class="annotation-footer"><span role="status">{status}</span><span class="canvas-help">Tab selects · Arrows move · Enter edits text · Corner handle resizes</span><span>{imageWidth ? `${imageWidth} × ${imageHeight}` : 'Loading image…'}</span></footer>
+  <footer class="annotation-footer"><span role="status">{status}</span><span>{imageWidth ? `${imageWidth} × ${imageHeight}` : 'Loading image…'}</span></footer>
   </fieldset>
 </dialog>
 
@@ -245,7 +288,6 @@
   /* Fixed chrome surrounds a scrollable stage without changing source-pixel coordinates. */
   .annotation-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 20px; border-bottom: 1px solid var(--border); background: #252526; }
   h2 { font-size: 15px; font-weight: 600; margin: 0; }
-  .subtitle { font-size: 11px; color: #999; }
   .output-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
   .output-actions button { font-size: 12px; }
   kbd { font-family: inherit; font-size: 10px; opacity: .55; margin-left: 10px; }
@@ -258,8 +300,12 @@
   .tool-button kbd { margin-left: auto; }
   .tool-button[aria-pressed='true'] { background: #094771; color: #b9e0ff; border-color: #2675a5; }
   .tool-divider { height: 1px; background: var(--border); margin: 14px 6px; }
-  .delete-button:not(:disabled) { color: #f2a1a1; }
-  .tool-hint { color: #888; font-size: 11px; line-height: 1.6; margin: 16px 10px; }
+  .image-caption-overlay { position: absolute; inset: auto 0 0; padding: 24px 16px 12px; background: linear-gradient(transparent, #000c); }
+  .image-caption-field { position: relative; display: grid; max-height: 120px; overflow: hidden; color: #fff; font: 14px/1.5 sans-serif; text-align: center; }
+  .image-caption-field span { grid-area: 1 / 1; padding: 4px 8px; white-space: pre-wrap; overflow-wrap: anywhere; visibility: hidden; }
+  .image-caption-field textarea { position: absolute; inset: 0; box-sizing: border-box; width: 100%; height: 100%; min-height: 0; margin: 0; padding: 4px 8px; resize: none; color: inherit; background: transparent; border: 0; border-radius: 4px; outline: none; box-shadow: none; font: inherit; text-align: inherit; overflow-wrap: anywhere; }
+  .image-caption-field textarea:focus-visible { box-shadow: inset 0 -1px 0 #ffffff50; }
+  .image-caption-field textarea::placeholder { color: #ffffffa6; }
   .annotation-main { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
   .annotation-properties { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--border); background: #252526; }
   .color-palette { display: flex; align-items: center; gap: 7px; }
@@ -282,7 +328,6 @@
   .annotation-footer > :last-child { margin-left: auto; }
   @media (max-width: 720px) {
     .annotation-header { padding: 10px; }
-    .subtitle, .canvas-help { display: none; }
     .annotation-tools { width: 116px; padding: 12px 5px; }
     .tool-button { gap: 6px; }
     .tool-button kbd { display: none; }

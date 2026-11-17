@@ -59,7 +59,7 @@ class ImageWidget extends WidgetType {
         overlay.setAttribute('viewBox', `0 0 ${image.naturalWidth} ${image.naturalHeight}`);
         overlay.setAttribute('aria-hidden', 'true');
         overlay.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none';
-        overlay.innerHTML = annotationSvg(this.block.annotations);
+        overlay.innerHTML = annotationSvg(this.block.annotations, -1, -1, image.naturalWidth, image.naturalHeight);
         button.append(overlay); view.requestMeasure();
       };
       image.onerror = unavailable;

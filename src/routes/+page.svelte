@@ -75,6 +75,19 @@
   /** Native modal focus containment and restoration keep backup controls out of the editing workspace. */
   function openBackups() { backupDialog.showModal(); }
 
+  function openAppMenu(event: MouseEvent, id: string) {
+    const menu = document.getElementById(id);
+    if (!menu) return;
+    const rect = event.currentTarget instanceof HTMLElement ? event.currentTarget.getBoundingClientRect() : undefined;
+    menu.style.left = `${Math.max(4, Math.min(rect?.left ?? 4, window.innerWidth - 288))}px`;
+    menu.style.top = `${rect?.bottom ?? 32}px`;
+    menu.showPopover();
+    menu.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
+  }
+  function closeAppMenus() {
+    for (const menu of document.querySelectorAll<HTMLElement>('.app-command-menu')) menu.hidePopover();
+  }
+
   /** Native popover dismissal supports pointer, Escape, and keyboard-triggered tab context menus. */
   function openTabMenu(event: MouseEvent, id: storage.NoteId) {
     event.preventDefault();
@@ -652,24 +665,41 @@
 <main class="flex h-dvh flex-col bg-[#1e1e1e] text-sm text-[#d4d4d4]" aria-busy={loading || frozen}>
   <!-- Primary actions stay visible; infrequent commands use the native light-dismiss popover. -->
   <header class="app-header">
-    <button class="icon-button" type="button" aria-label="Toggle note sidebar" title="Toggle sidebar (Ctrl/Cmd+B)" aria-pressed={session.sidebarVisible} disabled={loading || frozen || busy} onclick={() => runTab(toggleSidebar)}>☰</button>
-    <h1>Simple Note</h1>
+    <svg class="app-mark" viewBox="0 0 24 24" role="img" aria-label="Simple Note"><path d="M6 3h9l4 4v14H6zM14 3v5h5M9 12h7M9 16h5" /></svg>
+    <nav class="app-menubar" aria-label="Application menus">
+      {#each ['File', 'Edit', 'Selection', 'View'] as name}
+        <button type="button" aria-haspopup="true" popovertarget={`app-${name.toLowerCase()}-menu`} onclick={event => { event.preventDefault(); openAppMenu(event, `app-${name.toLowerCase()}-menu`); }}>{name}</button>
+      {/each}
+    </nav>
     <div class="header-actions">
-      <button class="primary-button" type="button" disabled={loading || frozen || busy || !!startupError} onclick={() => runTab(newNote)}>＋ New note</button>
+      <button type="button" disabled={loading || frozen || busy || !!startupError} onclick={() => runTab(newNote)}>＋ New note</button>
       <button type="button" disabled={loading || frozen || inserting || busy || !session.activeNoteId || !!startupError} onclick={() => pasteScreenshot()}>{inserting ? 'Adding image…' : 'Paste screenshot'}</button>
-      <button class="icon-button" type="button" aria-label="More actions" title="More actions" popovertarget="app-menu">···</button>
     </div>
-    <div id="app-menu" popover class="command-menu app-menu">
-      <button type="button" disabled={loading || frozen || busy || !closed.length} onclick={() => { document.getElementById('app-menu')?.hidePopover(); runTab(reopenNote); }}>Reopen closed tab <kbd>⇧⌘/Ctrl T</kbd></button>
+    <div id="app-file-menu" popover class="command-menu app-command-menu">
+      <button type="button" disabled={loading || frozen || busy || !!startupError} onclick={() => { closeAppMenus(); runTab(newNote); }}>New note <kbd>Ctrl+N</kbd></button>
+      <button type="button" disabled={loading || frozen || busy || !closed.length} onclick={() => { closeAppMenus(); runTab(reopenNote); }}>Reopen closed tab <kbd>Ctrl+Shift+T</kbd></button>
+      <div class="menu-separator"></div>
+      <button type="button" onclick={() => { closeAppMenus(); openBackups(); }}>Backup and restore…</button>
+      <button type="button" disabled={frozen} onclick={() => { closeAppMenus(); void storage.requestExit().catch(error => { saveError = errorMessage(error); }); }}>Quit</button>
+    </div>
+    <div id="app-edit-menu" popover class="command-menu app-command-menu">
       <fieldset disabled={loading || frozen || inserting || busy || !session.activeNoteId || !!startupError} aria-label="Editor commands">
-        <button type="button" onclick={() => { document.getElementById('app-menu')?.hidePopover(); void openFind(); }}>Find in note <kbd>⌘/Ctrl F</kbd></button>
-        <button type="button" onclick={() => view && undo(view)}>Undo</button>
-        <button type="button" onclick={() => view && redo(view)}>Redo</button>
-        <button type="button" onclick={() => moveSelection(-1)}>Move selection left</button>
-        <button type="button" onclick={() => moveSelection(1)}>Move selection right</button>
+        <button type="button" onclick={() => { closeAppMenus(); if (view) { undo(view); view.focus(); } }}>Undo <kbd>Ctrl+Z</kbd></button>
+        <button type="button" onclick={() => { closeAppMenus(); if (view) { redo(view); view.focus(); } }}>Redo <kbd>Ctrl+Shift+Z</kbd></button>
+        <div class="menu-separator"></div>
+        <button type="button" onclick={() => { closeAppMenus(); void openFind(); }}>Find in note <kbd>Ctrl+F</kbd></button>
+        <button type="button" onclick={() => { closeAppMenus(); void pasteScreenshot(); }}>Paste screenshot</button>
       </fieldset>
-      <button type="button" onclick={() => { document.getElementById('app-menu')?.hidePopover(); openBackups(); }}>Backup and restore…</button>
-      <button type="button" disabled={frozen} onclick={() => storage.requestExit().catch(error => { saveError = errorMessage(error); })}>Quit</button>
+    </div>
+    <div id="app-selection-menu" popover class="command-menu app-command-menu">
+      <fieldset disabled={loading || frozen || inserting || busy || !session.activeNoteId || !!startupError} aria-label="Selection commands">
+        <button type="button" onclick={() => { closeAppMenus(); moveSelection(-1); }}>Move selection left</button>
+        <button type="button" onclick={() => { closeAppMenus(); moveSelection(1); }}>Move selection right</button>
+      </fieldset>
+    </div>
+    <div id="app-view-menu" popover class="command-menu app-command-menu">
+      <button type="button" disabled={loading || frozen || busy} onclick={() => { closeAppMenus(); runTab(toggleSidebar); }}>{session.sidebarVisible ? 'Hide' : 'Show'} Explorer <kbd>Ctrl+B</kbd></button>
+      <button type="button" disabled={loading || frozen || busy || !session.activeNoteId} onclick={() => { closeAppMenus(); toggleWrap(); }}>{wrap ? 'Disable' : 'Enable'} word wrap</button>
     </div>
   </header>
   <dialog bind:this={backupDialog} class="settings-dialog" aria-labelledby="backup-heading" oncancel={event => { if (backupPending || restorePreview) event.preventDefault(); }}>

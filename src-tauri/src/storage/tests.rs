@@ -623,3 +623,31 @@ fn shape_validation() {
     .unwrap();
     assert!(validate_annotation(&circle, 1, 1).is_ok());
 }
+
+#[test]
+fn caption_persists_after_restart_and_rejects_oversized_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path()).unwrap();
+    let image = store.put_attachment(png()).unwrap();
+    let mut data = with_image(image.id);
+    if let Block::Image { annotations, .. } = &mut data.document.blocks[1] {
+        annotations.push(Annotation::Caption {
+            text: "Image caption".into(),
+        });
+    }
+    let expected = data.document.clone();
+    let note = store.create_note(data).unwrap();
+    drop(store);
+    let store = Store::open(dir.path()).unwrap();
+    assert_eq!(store.load_note(note.summary.id).unwrap().document, expected);
+    assert!(
+        validate_annotation(
+            &Annotation::Caption {
+                text: "x".repeat(65537)
+            },
+            1,
+            1
+        )
+        .is_err()
+    );
+}

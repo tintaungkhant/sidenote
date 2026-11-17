@@ -19,8 +19,15 @@ button[aria-pressed='true'] { background: #37373d; color: white; }
 input, select, textarea { border: 1px solid #484848; border-radius: 3px; background: #313131; color: #ddd; padding: 5px 8px; }
 input::placeholder { color: #a1a1a1; }
 fieldset { min-width: 0; }
-.app-header { display: flex; flex-shrink: 0; align-items: center; gap: 8px; height: 48px; padding: 0 12px; border-bottom: 1px solid var(--border); background: #252526; }
-.app-header h1 { font-size: 13px; font-weight: 600; letter-spacing: .2px; }
+.app-header { display: flex; flex-shrink: 0; align-items: center; gap: 8px; height: 32px; padding: 0 8px; border-bottom: 1px solid var(--border); background: #181818; }
+.app-mark { width: 18px; height: 18px; flex-shrink: 0; fill: none; stroke: #3794ff; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; margin-right: 2px; }
+.app-menubar { display: flex; align-items: center; gap: 0; }
+.app-menubar > button { font-size: 13px; color: #aaa; padding: 4px 8px; border-radius: 4px; }
+.app-menubar > button:hover { color: #eee; }
+.header-actions > button { font-size: 12px; padding: 3px 8px; color: #aaa; }
+.app-command-menu { width: 280px; }
+.app-command-menu fieldset { border: 0; margin: 0; padding: 0; }
+.menu-separator { height: 1px; background: #454545; margin: 4px 7px; }
 .header-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 .icon-button { font-size: 19px; min-width: 32px; padding: 2px 6px; }
 .primary-button { background: #0e639c; color: white; }
@@ -29,11 +36,10 @@ fieldset { min-width: 0; }
 .command-menu button { display: flex; align-items: center; justify-content: space-between; width: 100%; text-align: left; font-size: 12px; padding: 7px 9px; }
 .command-menu fieldset { border-block: 1px solid var(--border); padding-block: 4px; margin-block: 4px; }
 .command-menu kbd { font-size: 10px; color: var(--muted); margin-left: 8px; }
-.app-menu { top: 47px; right: 12px; left: auto; width: 280px; }
-.tab-strip { display: flex; flex-shrink: 0; min-height: 38px; overflow-x: auto; background: #181818; border-bottom: 1px solid var(--border); }
+.tab-strip { display: flex; flex-shrink: 0; min-height: 34px; overflow-x: auto; background: #181818; border-bottom: 1px solid var(--border); }
 .note-tab { display: flex; align-items: center; flex-shrink: 0; border-right: 1px solid #2b2b2b; border-top: 2px solid transparent; color: #aaa; background: #242424; }
 .note-tab.active { background: var(--editor); border-top-color: var(--accent); color: #fff; }
-.tab-label { max-width: 220px; min-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 8px 10px; text-align: left; border-radius: 0; font-size: 12px; }
+.tab-label { max-width: 220px; min-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 6px 10px; text-align: left; border-radius: 0; font-size: 12px; }
 .tab-symbol { color: var(--accent); margin-right: 8px; font-size: 11px; }
 .tab-action { padding: 2px 5px; margin-right: 2px; color: #aaa; }
 .rename-bar, .find-bar { display: flex; flex-shrink: 0; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--border); background: var(--surface); }
@@ -69,7 +75,8 @@ fieldset { min-width: 0; }
 
 @media (max-width: 640px) {
   .app-header { padding-inline: 6px; gap: 4px; }
-  .app-header h1 { display: none; }
+  .header-actions { display: none; }
+  .app-menubar > button { padding-inline: 7px; }
   .header-actions { gap: 2px; }
   .note-sidebar { width: 190px; }
   .status-bar { flex-wrap: wrap; gap: 4px 8px; }

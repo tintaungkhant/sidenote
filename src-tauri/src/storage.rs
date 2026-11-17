@@ -53,6 +53,9 @@ pub struct Point {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum Annotation {
+    Caption {
+        text: String,
+    },
     Pen {
         points: Vec<Point>,
         color: String,
@@ -198,6 +201,13 @@ fn validate_annotation(annotation: &Annotation, width: u32, height: u32) -> Resu
             && y <= height as f64
     };
     let (color, size) = match annotation {
+        Annotation::Caption { text } => {
+            return if text.len() <= 64 * 1024 {
+                Ok(())
+            } else {
+                Err(invalid("Invalid caption text"))
+            };
+        }
         Annotation::Text {
             x,
             y,

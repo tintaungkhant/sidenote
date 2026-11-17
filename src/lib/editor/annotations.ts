@@ -27,6 +27,7 @@ export function imagePoint(x: number, y: number, rect: { left: number; top: numb
 
 /** Clamp a whole annotation together so moving it never distorts or exceeds the original image. */
 export function translate(annotation: Annotation, dx: number, dy: number, width: number, height: number): Annotation {
+  if (annotation.kind === 'caption') return annotation;
   const points = annotation.kind === 'text' ? [annotation] : annotation.points;
   const bounds = points.reduce((b, p) => ({ left: Math.min(b.left, p.x), right: Math.max(b.right, p.x), top: Math.min(b.top, p.y), bottom: Math.max(b.bottom, p.y) }), { left: width, right: 0, top: height, bottom: 0 });
   dx = Math.max(-bounds.left, Math.min(dx, width - bounds.right));
@@ -37,6 +38,7 @@ export function translate(annotation: Annotation, dx: number, dy: number, width:
 
 /** Source-pixel selection bounds; text uses an approximate font-width estimate, including empty captions. */
 export function annotationBounds(a: Annotation) {
+  if (a.kind === 'caption') return { left: 0, top: 0, right: 0, bottom: 0 };
   if (a.kind === 'text') {
     const lines = a.text.split('\n');
     return { left: a.x, top: a.y, right: a.x + Math.max(1, ...lines.map(line => Array.from(line).length)) * a.fontSize * 0.7,
@@ -48,6 +50,7 @@ export function annotationBounds(a: Annotation) {
 
 /** Resize uniformly from the top-left without mutating source or exceeding native coordinate/style limits. */
 export function resizeAnnotation(a: Annotation, target: Point, width: number, height: number): Annotation {
+  if (a.kind === 'caption') return a;
   const b = annotationBounds(a), w = Math.max(1, b.right - b.left), h = Math.max(1, b.bottom - b.top);
   const size = a.kind === 'text' ? a.fontSize : a.width;
   const scale = Math.max(0.001, Math.min(Math.max(0.05, Math.min((target.x - b.left) / w, (target.y - b.top) / h)),
@@ -62,8 +65,25 @@ function escape(value: string): string {
 }
 
 /** Shared vector renderer keeps inline and focused views in the same original-image coordinate space. */
-export function annotationSvg(annotations: readonly Annotation[], selected = -1, editing = -1): string {
+export function captionLayout(text: string, width: number, height: number) {
+  const fontSize = Math.max(1, Math.min(24, width / 24, height / 6));
+  const padding = fontSize / 2;
+  const columns = Math.max(1, Math.floor((width - padding * 2) / (fontSize * 0.7)));
+  const lines = text.split('\n').flatMap(line => {
+    const chars = Array.from(line);
+    return chars.length ? Array.from({ length: Math.ceil(chars.length / columns) }, (_, i) => chars.slice(i * columns, (i + 1) * columns).join('')) : [''];
+  });
+  const top = Math.max(0, height - lines.length * fontSize * 1.2 - padding * 2);
+  return { fontSize, padding, lines, top };
+}
+
+export function annotationSvg(annotations: readonly Annotation[], selected = -1, editing = -1, width = 0, height = 0): string {
   return annotations.map((a, index) => {
+    if (a.kind === 'caption') {
+      if (!a.text || index === editing) return '';
+      const { fontSize, padding, lines, top } = captionLayout(a.text, width, height);
+      return `<g data-annotation="${index}"><rect x="0" y="${top}" width="${width}" height="${height - top}" fill="#000000" fill-opacity="0.7"/><text fill="#ffffff" font-size="${fontSize}" font-family="sans-serif" text-anchor="middle" dominant-baseline="hanging">${lines.map((line, i) => `<tspan x="${width / 2}" y="${top + padding + i * fontSize * 1.2}">${escape(line)}</tspan>`).join('')}</text></g>`;
+    }
     const style = `stroke="${escape(a.color)}" stroke-width="${a.kind === 'text' ? 1 : a.width}"`;
     let shape: string;
     if (a.kind === 'text') shape = `<text x="${a.x}" y="${a.y}" fill="${escape(a.color)}" font-size="${a.fontSize}" font-family="sans-serif" dominant-baseline="hanging">${a.text.split('\n').map((line, i) => `<tspan x="${a.x}" dy="${i ? '1.2em' : '0'}">${escape(line)}</tspan>`).join('')}</text>`;
