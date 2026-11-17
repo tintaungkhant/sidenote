@@ -79,8 +79,9 @@
     event.preventDefault(); surface.focus();
     const p = point(event);
     pointerOrigin = { x: event.clientX, y: event.clientY };
-    if (tool === 'select') {
-      const element = (event.target as Element).closest('[data-annotation]');
+    const element = (event.target as Element).closest('[data-annotation]');
+    // Visible selection controls edit their object even while a drawing tool remains active.
+    if (tool === 'select' || (element && Number(element.getAttribute('data-annotation')) === selected)) {
       select(element ? Number(element.getAttribute('data-annotation')) : -1);
       if (selected < 0) return;
       gesture = { start: p, original: annotations[selected], pointer: event.pointerId, resize: !!(event.target as Element).closest('[data-resize]') };
