@@ -667,16 +667,12 @@
 <main class="flex h-dvh flex-col bg-[#1e1e1e] text-sm text-[#d4d4d4]" aria-busy={loading || frozen}>
   <!-- Primary actions stay visible; infrequent commands use the native light-dismiss popover. -->
   <header class="app-header">
-    <svg class="app-mark" viewBox="0 0 24 24" role="img" aria-label="Simple Note"><path d="M6 3h9l4 4v14H6zM14 3v5h5M9 12h7M9 16h5" /></svg>
+    <img class="app-mark" src="/app-icon.png" alt="Simple Note" />
     <nav class="app-menubar" aria-label="Application menus">
       {#each ['File', 'Edit', 'View'] as name}
         <button type="button" aria-haspopup="true" popovertarget={`app-${name.toLowerCase()}-menu`} onclick={event => { event.preventDefault(); openAppMenu(event, `app-${name.toLowerCase()}-menu`); }}>{name}</button>
       {/each}
     </nav>
-    <div class="header-actions">
-      <button type="button" disabled={loading || frozen || busy || !!startupError} onclick={() => runTab(newNote)}>＋ New note</button>
-      <button type="button" disabled={loading || frozen || inserting || busy || !session.activeNoteId || !!startupError} onclick={() => pasteScreenshot()}>{inserting ? 'Adding image…' : 'Paste screenshot'}</button>
-    </div>
     <div id="app-file-menu" popover class="command-menu app-command-menu">
       <button type="button" disabled={loading || frozen || busy || !!startupError} onclick={() => { closeAppMenus(); runTab(newNote); }}>New note <kbd>Ctrl+N</kbd></button>
       <button type="button" disabled={loading || frozen || busy || !closed.length} onclick={() => { closeAppMenus(); runTab(reopenNote); }}>Reopen closed tab <kbd>Ctrl+Shift+T</kbd></button>

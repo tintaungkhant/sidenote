@@ -20,15 +20,13 @@ input, select, textarea { border: 1px solid #484848; border-radius: 3px; backgro
 input::placeholder { color: #a1a1a1; }
 fieldset { min-width: 0; }
 .app-header { display: flex; flex-shrink: 0; align-items: center; gap: 8px; height: 32px; padding: 0 8px; border-bottom: 1px solid var(--border); background: #181818; }
-.app-mark { width: 18px; height: 18px; flex-shrink: 0; fill: none; stroke: #3794ff; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; margin-right: 2px; }
+.app-mark { width: 18px; height: 18px; flex-shrink: 0; object-fit: contain; margin-right: 2px; }
 .app-menubar { display: flex; align-items: center; gap: 0; }
 .app-menubar > button { font-size: 13px; color: #aaa; padding: 4px 8px; border-radius: 4px; }
 .app-menubar > button:hover { color: #eee; }
-.header-actions > button { font-size: 12px; padding: 3px 8px; color: #aaa; }
 .app-command-menu { width: 280px; }
 .app-command-menu fieldset { border: 0; margin: 0; padding: 0; }
 .menu-separator { height: 1px; background: #454545; margin: 4px 7px; }
-.header-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 .icon-button { font-size: 19px; min-width: 32px; padding: 2px 6px; }
 .primary-button { background: #0e639c; color: white; }
 .primary-button:hover:not(:disabled) { background: #1177bb; }
@@ -80,9 +78,7 @@ fieldset { min-width: 0; }
 
 @media (max-width: 640px) {
   .app-header { padding-inline: 6px; gap: 4px; }
-  .header-actions { display: none; }
   .app-menubar > button { padding-inline: 7px; }
-  .header-actions { gap: 2px; }
   .note-sidebar { width: 190px; }
   .status-bar { flex-wrap: wrap; gap: 4px 8px; }
   .status-notice { max-width: 100%; }
