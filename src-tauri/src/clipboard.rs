@@ -1,9 +1,9 @@
 //! Clipboard access is read-only and returns only validated, durably stored raster originals.
-use crate::{
-    queue::Storage,
-    storage::{Attachment, StoreError},
-};
+use crate::storage::StoreError;
+#[cfg(test)]
+use crate::{queue::Storage, storage::Attachment};
 use image::ImageEncoder;
+#[cfg(test)]
 use tauri::State;
 
 /// Preserve platform errors without treating an inaccessible clipboard as an empty one.
@@ -76,6 +76,8 @@ fn read_image() -> Result<Option<Vec<u8>>, StoreError> {
 }
 
 /// Read screenshots through native Windows/macOS formats off the UI thread; no image permits text fallback.
+#[cfg(test)]
+#[allow(dead_code)]
 #[tauri::command]
 pub async fn paste_image(state: State<'_, Storage>) -> Result<Option<Attachment>, StoreError> {
     let bytes = tauri::async_runtime::spawn_blocking(read_image)
@@ -121,4 +123,16 @@ mod tests {
         let image = image::load_from_memory(&png).unwrap();
         assert_eq!((image.width(), image.height()), (2, 1));
     }
+}
+
+/// File editor owns asset persistence; clipboard pixels never enter SQLite.
+#[tauri::command]
+pub async fn file_clipboard() -> Result<Option<Vec<u8>>, StoreError> {
+    let bytes = tauri::async_runtime::spawn_blocking(read_image)
+        .await
+        .map_err(failed)??;
+    if let Some(bytes) = &bytes {
+        crate::files::validate_image(bytes)?;
+    }
+    Ok(bytes)
 }

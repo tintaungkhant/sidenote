@@ -1,14 +1,24 @@
+#[cfg(test)]
+#[allow(dead_code)]
 mod backup;
 mod clipboard;
+#[cfg(test)]
+#[allow(dead_code)]
 mod commands;
+mod files;
 mod image_output;
 mod lifecycle;
+#[cfg(test)]
+#[allow(dead_code)]
 mod queue;
+#[cfg(test)]
+#[allow(dead_code)]
 mod recovery;
+#[allow(dead_code)] // Legacy data remains untouched; its regression tests stay available.
 mod storage;
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
-/// Acquire the single-instance guard before opening SQLite, then install guarded close and quit paths.
+/// One instance owns the recovery files; saved documents stay in their chosen locations.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -21,13 +31,11 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .manage(lifecycle::ExitState::default())
-        .manage(backup::RestoreState::default())
         .setup(|app| {
             let directory = app.path().app_data_dir()?;
-            let handle = app.handle().clone();
-            app.manage(queue::Storage::open(directory, move |status| {
-                let _ = handle.emit("backup-status", status);
-            })?);
+            app.manage(files::Files(std::sync::Mutex::new(files::FileStore::new(
+                directory,
+            )?)));
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -43,29 +51,15 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            clipboard::paste_image,
             image_output::copy_image,
             image_output::export_image,
-            backup::backup_status,
-            backup::export_backup,
-            backup::prepare_restore,
-            backup::cancel_restore,
-            backup::restore_backup,
-            commands::create_note,
-            commands::load_note,
-            commands::update_note,
-            commands::list_notes,
-            commands::browse_notes,
-            commands::change_note_lifecycle,
-            commands::put_attachment,
-            commands::load_attachment,
-            commands::load_session,
-            commands::save_session,
+            files::file_operation,
+            files::file_picker,
+            clipboard::file_clipboard,
             lifecycle::request_exit,
             lifecycle::exit_ready,
             lifecycle::cancel_exit,
-            lifecycle::finish_exit,
-            recovery::export_recovery
+            lifecycle::finish_exit
         ])
         .build(tauri::generate_context!())
         .expect("Unable to start simple-note; the existing database has been preserved");

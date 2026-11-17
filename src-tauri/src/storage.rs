@@ -186,7 +186,7 @@ fn invalid(message: &str) -> StoreError {
     StoreError::new("validation", message)
 }
 /// Bound annotation coordinates and styles; original-image dimensions are checked separately.
-fn validate_annotation(annotation: &Annotation, width: u32, height: u32) -> Result<()> {
+pub(crate) fn validate_annotation(annotation: &Annotation, width: u32, height: u32) -> Result<()> {
     if let Annotation::Rectangle { points, .. } | Annotation::Circle { points, .. } = annotation {
         if points.len() != 2 {
             return Err(invalid("Shapes require exactly two corners"));
@@ -736,4 +736,5 @@ fn validate_session(expected_revision: i64, state: &Session) -> Result<String> {
 }
 
 pub(crate) mod backup;
+#[cfg(test)]
 pub use backup::{BackupStatus, PreparedRestore};

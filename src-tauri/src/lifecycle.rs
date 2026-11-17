@@ -1,5 +1,5 @@
 //! Normal close and explicit quit share an idempotent renderer-flush handshake.
-use crate::{queue::Storage, storage::StoreError};
+use crate::storage::StoreError;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use tauri::{Emitter, Manager, State};
 
@@ -71,7 +71,6 @@ pub fn cancel_exit(state: State<'_, ExitState>) {
 #[tauri::command]
 pub async fn finish_exit(
     app: tauri::AppHandle,
-    storage: State<'_, Storage>,
     state: State<'_, ExitState>,
     discard: bool,
 ) -> Result<(), StoreError> {
@@ -80,13 +79,6 @@ pub async fn finish_exit(
             code: "validation",
             message: "No close attempt is pending".into(),
         });
-    }
-    // Discard still waits for submitted commits; it never interrupts SQLite mid-transaction.
-    if let Err(error) = storage.submit(|_| Ok(())).await {
-        // A stopped worker has no remaining commits to drain. Only explicit discard may exit in that case.
-        if !discard {
-            return Err(error);
-        }
     }
     state.phase.store(2, Ordering::SeqCst);
     app.exit(0);

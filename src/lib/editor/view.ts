@@ -1,10 +1,13 @@
 /** Browser-only image presentation; callers provide local attachment sources. */
-import { Decoration, EditorView, WidgetType } from '@codemirror/view';
-import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
+import { Decoration, EditorView, WidgetType, type DecorationSet } from '@codemirror/view';
+import { StateField, type EditorState } from '@codemirror/state';
+import { HighlightStyle, syntaxHighlighting, syntaxTree } from '@codemirror/language';
 import { tags } from '@lezer/highlight';
 import { imageField, selectionText } from './state';
 import type { AttachmentId, ImageBlock } from './document';
 import { annotationSvg } from './annotations';
+import { metadataField, sourceImages } from './references';
+import type { Language } from '../files';
 
 /** Modern developer syntax highlighting theme inspired by Cursor & One Dark Pro. */
 export const cursorHighlightStyle = HighlightStyle.define([
@@ -42,12 +45,13 @@ function exportClipboard(event: ClipboardEvent, view: EditorView, cut: boolean):
 }
 
 class ImageWidget extends WidgetType {
-  constructor(readonly block: ImageBlock, readonly load: (id: AttachmentId) => Promise<Blob>, readonly open: (block: ImageBlock) => void) { super(); }
+  constructor(readonly block: ImageBlock, readonly load: (id: AttachmentId) => Promise<Blob>, readonly open: (block: ImageBlock) => void, readonly blockLayout = false) { super(); }
   private releases = new WeakMap<HTMLElement, () => void>();
-  /** Stable identity permits widget reuse across text changes. */
-  eq(other: ImageWidget): boolean { return this.block === other.block && this.load === other.load && this.open === other.open; }
+  get estimatedHeight() { return this.blockLayout ? 230 : -1; }
+  /** Stable identity permits widget reuse across selection changes. */
+  eq(other: ImageWidget): boolean { return this.block === other.block && this.load === other.load && this.open === other.open && this.blockLayout === other.blockLayout; }
   /** Load only mounted widgets; each widget owns and revokes its object URL. */
-  toDOM(view: EditorView): HTMLElement {
+  toDOM(): HTMLElement {
     const image = document.createElement('img');
     const status = document.createElement('span');
     status.className = 'note-image-status';
@@ -58,20 +62,28 @@ class ImageWidget extends WidgetType {
     button.setAttribute('aria-label', 'Annotate image');
     button.title = 'Click to open annotation editor';
     button.onclick = () => this.open(this.block);
-    button.append(image, status);
+    const area = document.createElement('span');
+    area.className = 'note-image-area';
+    area.append(image, status);
+    const caption = document.createElement('span');
+    caption.className = 'note-image-caption';
+    caption.textContent = this.block.annotations.find(a => a.kind === 'caption')?.text ?? '';
+    button.append(area, caption);
+    // CodeMirror measures the block root's border box. Keep all vertical spacing inside it.
+    const root = this.blockLayout ? document.createElement('div') : button;
+    if (this.blockLayout) { root.className = 'note-image-block'; root.append(button); }
     image.hidden = true;
     image.alt = 'Note image';
     image.className = 'note-image';
     image.draggable = false;
     let alive = true;
     let url: string | undefined;
-    this.releases.set(button, () => { alive = false; image.onload = image.onerror = null; image.removeAttribute('src'); if (url) URL.revokeObjectURL(url); });
+    this.releases.set(root, () => { alive = false; image.onload = image.onerror = null; image.removeAttribute('src'); if (url) URL.revokeObjectURL(url); });
     const unavailable = () => {
       if (!alive) return;
       image.hidden = true;
       status.hidden = false;
       status.textContent = 'Image unavailable; reopen the tab to retry';
-      view.requestMeasure();
     };
     void this.load(this.block.attachmentId).then(blob => {
       if (!alive) return;
@@ -84,13 +96,13 @@ class ImageWidget extends WidgetType {
         overlay.setAttribute('viewBox', `0 0 ${image.naturalWidth} ${image.naturalHeight}`);
         overlay.setAttribute('aria-hidden', 'true');
         overlay.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none';
-        overlay.innerHTML = annotationSvg(this.block.annotations, -1, -1, image.naturalWidth, image.naturalHeight);
-        button.append(overlay); view.requestMeasure();
+        overlay.innerHTML = annotationSvg(this.block.annotations.filter(a => a.kind !== 'caption'), -1, -1, image.naturalWidth, image.naturalHeight);
+        area.append(overlay);
       };
       image.onerror = unavailable;
       image.src = url;
     }).catch(unavailable);
-    return button;
+    return root;
   }
   /** Dropped viewport widgets release decoded image resources, including late asynchronous loads. */
   destroy(dom: HTMLElement): void { this.releases.get(dom)?.(); this.releases.delete(dom); }
@@ -125,11 +137,31 @@ export function imagePresentation(load: (id: AttachmentId) => Promise<Blob>, ope
       '.cm-cursor': { borderLeft: '2px solid #38bdf8' },
       '&.cm-focused .cm-selectionBackground, .cm-selectionBackground': { backgroundColor: 'rgba(99, 102, 241, 0.3)' },
       '&.cm-focused .cm-matchingBracket': { outline: '1px solid #38bdf8', backgroundColor: 'rgba(56, 189, 248, 0.15)' },
-      '.note-image-button': { position: 'relative', display: 'inline-block', maxWidth: '100%', padding: '0', border: '1px solid #282a35', borderRadius: '8px', overflow: 'hidden', margin: '8px 0', verticalAlign: 'middle', lineHeight: '0', backgroundColor: '#181920', boxShadow: '0 4px 20px rgba(0,0,0,0.3)', transition: 'all 0.15s ease', cursor: 'pointer' },
+      '.note-image-button': { position: 'relative', display: 'inline-block', width: '320px', maxWidth: '100%', padding: '0', border: '1px solid #282a35', borderRadius: '8px', overflow: 'hidden', margin: '8px 0', verticalAlign: 'middle', lineHeight: '0', backgroundColor: '#181920', boxShadow: '0 4px 20px rgba(0,0,0,0.3)', transition: 'all 0.15s ease', cursor: 'pointer' },
       '.note-image-button:hover': { borderColor: '#6366f1', boxShadow: '0 6px 24px rgba(99, 102, 241, 0.25)' },
-      '.note-image': { display: 'block', maxWidth: '100%', maxHeight: '340px' },
+      '.note-image-block': { display: 'flow-root', padding: '8px 0' },
+      '.note-image-block .note-image-button': { display: 'block', boxSizing: 'border-box', width: '100%', maxWidth: '320px', margin: '0' },
+      '.note-image-area': { position: 'relative', display: 'block', height: '180px' },
+      '.note-image': { display: 'block', width: '100%', height: '180px', objectFit: 'contain' },
+      '.note-image-caption': { display: 'block', boxSizing: 'border-box', height: '32px', padding: '0 10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', font: '12px/32px sans-serif', color: '#d1d5db', textAlign: 'left' },
       '.note-image[hidden], .note-image-status[hidden]': { display: 'none' },
-      '.note-image-status': { display: 'block', padding: '16px', lineHeight: '1.4', color: '#9ca3af', fontSize: '12px' }
+      '.note-image-status': { display: 'flex', boxSizing: 'border-box', alignItems: 'center', justifyContent: 'center', height: '180px', padding: '16px', lineHeight: '1.4', color: '#9ca3af', fontSize: '12px' }
     }, { dark: true })
   ];
+}
+
+/** Keep the portable source visible and place its preview below the reference line. */
+export function referencePresentation(language: Language, load: (id: AttachmentId) => Promise<Blob>, open: (block: ImageBlock) => void) {
+  const legacy = imagePresentation(load, open);
+  const build = (state: EditorState) => Decoration.set(
+    sourceImages(state, language).map(image => Decoration.widget({ widget: new ImageWidget(image.block, load, open, true), block: true, side: 1 }).range(state.doc.lineAt(image.to).to)), true
+  );
+  const previews = StateField.define<DecorationSet>({ create: build,
+    update(value, tr) {
+      if (tr.docChanged || tr.startState.field(metadataField) !== tr.state.field(metadataField) || syntaxTree(tr.startState) !== syntaxTree(tr.state)) return build(tr.state);
+      return value;
+    },
+    provide: field => EditorView.decorations.from(field)
+  });
+  return [legacy[2], previews];
 }

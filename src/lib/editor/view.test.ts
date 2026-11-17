@@ -32,20 +32,20 @@ test('initial image mount shows a placeholder and cleanup belongs to each DOM mo
     const view = { requestMeasure() {} } as unknown as EditorView;
     const first = widget.toDOM(view) as unknown as Element;
     const second = widget.toDOM(view) as unknown as Element;
-    expect(second.children[0].hidden).toBe(true);
-    expect(second.children[1].textContent).toBe('Loading image…');
+    expect(second.children[0].children[0].hidden).toBe(true);
+    expect(second.children[0].children[1].textContent).toBe('Loading image…');
     widget.destroy(first as unknown as HTMLElement);
     resolve(new Blob(['image'], { type: 'image/png' }));
     await pending;
     await Promise.resolve();
-    const image = second.children[0];
+    const image = second.children[0].children[0];
     expect(image.src).toStartWith('blob:');
     image.onload!();
     expect(image.hidden).toBe(false);
-    expect(second.children[1].hidden).toBe(true);
+    expect(second.children[0].children[1].hidden).toBe(true);
     image.onerror!();
     expect(image.hidden).toBe(true);
-    expect(second.children[1].textContent).toContain('Image unavailable');
+    expect(second.children[0].children[1].textContent).toContain('Image unavailable');
     widget.destroy(second as unknown as HTMLElement);
     expect(image.src).toBe('');
   } finally {

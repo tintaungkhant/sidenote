@@ -1,948 +1,432 @@
 <script lang="ts">
   import '../app.css';
   import { onMount, tick } from 'svelte';
-  import { Compartment, EditorState } from '@codemirror/state';
-  import { EditorView, drawSelection, highlightActiveLine, keymap, lineNumbers, type Command } from '@codemirror/view';
-  import { defaultKeymap, historyKeymap, indentWithTab, undo, redo, moveLineUp, moveLineDown, copyLineUp, copyLineDown, transposeChars } from '@codemirror/commands';
-  import { bracketMatching, indentOnInput } from '@codemirror/language';
-  import { findNext, search, setSearchQuery } from '@codemirror/search';
+  import { Compartment, type EditorState } from '@codemirror/state';
+  import { EditorView, drawSelection, highlightActiveLine, keymap, lineNumbers } from '@codemirror/view';
+  import { defaultKeymap, historyKeymap, indentWithTab, undo, redo } from '@codemirror/commands';
+  import { bracketMatching, indentOnInput, ensureSyntaxTree } from '@codemirror/language';
+  import { SearchQuery, findNext, search, setSearchQuery } from '@codemirror/search';
   import { javascript } from '@codemirror/lang-javascript';
   import { json } from '@codemirror/lang-json';
   import { html } from '@codemirror/lang-html';
   import { markdown } from '@codemirror/lang-markdown';
+  import { css } from '@codemirror/lang-css';
+  import { php } from '@codemirror/lang-php';
   import { listen } from '@tauri-apps/api/event';
-  import { createNoteState, imageField, insertImage, textSearch, annotateImage } from '$lib/editor/state';
+  import { invoke } from '@tauri-apps/api/core';
   import AnnotationEditor from '$lib/editor/AnnotationEditor.svelte';
-  import { decodeDocument, type Annotation, type AttachmentId, type ImageBlock, type ImageId } from '$lib/editor/document';
+  import type { Annotation, AttachmentId, ImageBlock } from '$lib/editor/document';
   import { flattenImage } from '$lib/editor/image-output';
-  import { imagePresentation, cursorSyntaxExtension } from '$lib/editor/view';
-  import { Autosave, errorMessage, type SaveStatus } from '$lib/autosave';
-  import { ExitGuard } from '$lib/exit';
-  import { emptySession, normalizeSession, openTab, closeTab, changeTab, automaticTitle, tabShortcut } from '$lib/tabs';
+  import { referencePresentation, cursorSyntaxExtension } from '$lib/editor/view';
+  import { insertion, imageSyntax, metadataField, referenceState, references, sourceImages, setMetadata } from '$lib/editor/references';
+  import { errorMessage } from '$lib/autosave';
+  import { tabShortcut } from '$lib/tabs';
   import * as storage from '$lib/storage';
+  import * as files from '$lib/files';
 
+  let workspace = $state.raw<files.Workspace>({ version: 1, buffers: [], active: null, root: null, wrap: true, sidebar: false });
+  let active = $derived(workspace.buffers.find(b => b.id === workspace.active));
   let host: HTMLDivElement;
   let view: EditorView | undefined;
-  let saver: Autosave | undefined;
-  let note: storage.Note | undefined;
-  let session = $state.raw<storage.Session>(emptySession());
-  let titles = $state<Record<string, string>>({});
-  let busy = $state(false);
-  let renameValue = $state('');
-  let renaming = $state(false);
-  let transition: Promise<void> = Promise.resolve();
-  const notes = new Map<storage.NoteId, storage.Note>();
-  const states = new Map<storage.NoteId, EditorState>();
-  const automatic = new Set<storage.NoteId>();
-  let closed = $state.raw<storage.SessionTab[]>([]);
-  let bootstrap: Promise<void> = Promise.resolve();
-  let insertion: Promise<void> | undefined;
-  let recovery: Promise<void> | undefined;
-  let imageOutput: Promise<string> | undefined;
-  let backupWork: Promise<void> | undefined;
-  let backupPending = $state(false);
-  let backupStatus = $state.raw<storage.BackupStatus>({ directory: '', lastBackup: null, error: null });
-  let restorePreview = $state.raw<storage.RestorePreview | null>(null);
-  let disposed = false;
-  let loading = $state(true);
-  let frozen = $state(false);
-  let inserting = $state(false);
-  let annotation = $state.raw<{ block: ImageBlock; blob: Blob } | undefined>();
-  let startupError = $state('');
-  let saveError = $state('');
-  let notice = $state('');
-  let saveStatus = $state<SaveStatus>('Saving');
-  let confirmDiscard = $state(false);
-  let language = $state<storage.NoteLanguage>('plaintext');
-  let wrap = $state(true);
-  let query = $state('');
-  let findVisible = $state(false);
-  let backupDialog: HTMLDialogElement;
-  let tabMenu: HTMLDivElement;
-  let libraryMenu: HTMLDivElement;
-  let libraryTarget = $state.raw<storage.NoteSummary | undefined>();
-  let menuNote = $state<storage.NoteId | undefined>();
-  let menuX = $state(0);
-  let menuY = $state(0);
-
-  /** Mount the compact find bar before focusing it; closing retains the query for the next search. */
-  async function openFind() {
-    findVisible = true;
-    await tick();
-    document.getElementById('find')?.focus();
-  }
-
-  /** Native modal focus containment and restoration keep backup controls out of the editing workspace. */
-  function openBackups() { backupDialog.showModal(); }
-
-  function openAppMenu(event: MouseEvent, id: string) {
-    const menu = document.getElementById(id);
-    if (!menu) return;
-    const rect = event.currentTarget instanceof HTMLElement ? event.currentTarget.getBoundingClientRect() : undefined;
-    menu.style.left = `${Math.max(4, Math.min(rect?.left ?? 4, window.innerWidth - 288))}px`;
-    menu.style.top = `${rect?.bottom ?? 32}px`;
-    menu.showPopover();
-    menu.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
-  }
-  function closeAppMenus() {
-    for (const menu of document.querySelectorAll<HTMLElement>('.app-command-menu')) menu.hidePopover();
-  }
-
-  /** Native popover dismissal supports pointer, Escape, and keyboard-triggered tab context menus. */
-  function openTabMenu(event: MouseEvent, id: storage.NoteId) {
-    event.preventDefault();
-    menuNote = id;
-    showContextMenu(event, tabMenu);
-  }
-
-  /** Position either native context popover at the pointer or its keyboard-focused row. */
-  async function showContextMenu(event: MouseEvent | KeyboardEvent, menu: HTMLElement) {
-    const rect = event.currentTarget instanceof HTMLElement ? event.currentTarget.getBoundingClientRect() : undefined;
-    menuX = Math.max(8, Math.min(('clientX' in event && event.clientX) || rect?.left || 8, window.innerWidth - 232));
-    menuY = Math.max(8, Math.min(('clientY' in event && event.clientY) || rect?.bottom || 48, window.innerHeight - 250));
-    await tick();
-    menu.showPopover();
-    menu.querySelector<HTMLButtonElement>('button')?.focus();
-  }
-
-  /** Keep the selected summary independent of the active editor; right-click never switches notes. */
-  function openLibraryMenu(event: MouseEvent | KeyboardEvent, item: storage.NoteSummary) {
-    event.preventDefault();
-    if (loading || frozen || busy || inserting || annotation) return;
-    libraryTarget = item;
-    showContextMenu(event, libraryMenu);
-  }
-
-  /** Route row actions through existing rename and revision-checked lifecycle operations. */
-  function libraryAction(action: 'rename' | 'trash' | 'restore' | 'purge') {
-    const item = libraryTarget;
-    libraryMenu.hidePopover();
-    if (!item || loading || frozen || busy || inserting || annotation) return;
-    if (action === 'rename') renameTab(item.id);
-    else if (action === 'purge') purge = item;
-    else runTab(() => lifecycle(item, action));
-  }
-
-  /** Reuse serialized tab operations so menu actions preserve autosave and editor identity. */
-  function tabAction(action: 'rename' | 'pin' | 'left' | 'right' | 'close') {
-    const id = menuNote;
-    tabMenu.hidePopover();
-    if (!id) return;
-    if (action === 'rename') { renameTab(id); return; }
-    runTab(async () => {
-      if (action === 'close') await closeNote(id);
-      else alterTab(id, action === 'pin' ? 'pin' : action === 'left' ? -1 : 1);
-    });
-  }
-
-  /** Both sidebar and tab menus focus the title only after the serialized transition enables its input. */
-  function renameTab(id: storage.NoteId) {
-    runTab(async () => { await mountNote(id); renameValue = note?.title ?? ''; renaming = true; });
-    void transition.then(async () => {
-      await tick();
-      if (renaming) document.getElementById('note-title')?.focus();
-    });
-  }
-
-  let sidebarPanel = $state<'explorer' | 'search'>('explorer');
-  let libraryQuery = $state('');
-  let library = $state.raw<storage.NoteSummary[]>([]);
-  let trash = $state(false);
-  let libraryMore = $state(false);
-  let purge = $state.raw<storage.NoteSummary | undefined>();
-  const languageSlot = new Compartment();
+  let viewId: string | undefined;
+  const states = new Map<string, EditorState>();
   const wrapSlot = new Compartment();
-  const editabilitySlot = new Compartment();
-  const sources = new Map<AttachmentId, Blob>();
-  const languageNames: Record<storage.NoteLanguage, string> = { plaintext: 'Plain text', markdown: 'Markdown', javascript: 'JavaScript', typescript: 'TypeScript', json: 'JSON', html: 'HTML' };
-  // Disable text-only reordering when images are present to preserve their sidecar identity.
-  const textOnlyCommands = new Set<Command>([moveLineUp, moveLineDown, copyLineUp, copyLineDown, transposeChars]);
-  const editingKeys = defaultKeymap.map(binding => ({ ...binding,
-    run: binding.run && textOnlyCommands.has(binding.run) ? (editor: EditorView) =>
-      editor.state.field(imageField).length > 0 || binding.run!(editor) : binding.run
-  }));
+  const editable = new Compartment();
+  let loading = $state(true), busy = $state(false), frozen = $state(false), startupError = $state(''), notice = $state(''), recoveryError = $state('');
+  let panel = $state<'explorer' | 'search'>('explorer'), query = $state(''), findQuery = $state(''), findVisible = $state(false);
+  let entries = $state.raw<files.Entry[]>([]);
+  let closeTarget = $state<string | null>(null);
+  let closeDialog: HTMLDialogElement;
+  let annotation = $state.raw<{ block: ImageBlock; blob: Blob } | undefined>();
+  let closed: files.Buffer[] = [];
+  let snapshotQueue: Promise<void> = Promise.resolve();
+  let action: Promise<void> = Promise.resolve();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let disposed = false, polling = false, started = false;
+  let exitWork: Promise<void> | undefined;
+  let boot: Promise<void> = Promise.resolve();
+  let outputWork: Promise<string> | undefined;
+  let menuBuffer = $state<string | null>(null);
+  let tabMenu: HTMLDivElement;
 
-  const exit = new ExitGuard({
-    freeze: setFrozen,
-    /** Await startup, image insertion/output, recovery, and tab transitions before taking the final close snapshot. */
-    prepare: async () => { await bootstrap.catch(() => {}); await insertion; await recovery; await imageOutput?.catch(() => {}); await backupWork; await transition; stageSession(); },
-    flush: async () => {
-      if (!saver) throw new Error(startupError || 'Storage has not finished loading');
-      await saver.flush();
-    },
-    finish: storage.finishExit,
-    cancel: storage.cancelExit,
-    failed: error => { saveError = errorMessage(error); }
-  });
-
-  /** Reflect acknowledgements only; a delayed save response never replaces current editor content. */
-  function refreshStatus() {
-    if (!saver) return;
-    saveStatus = saver.status;
-    saveError = saver.error ? errorMessage(saver.error) : '';
+  function patch(id: string, update: Partial<files.Buffer>) {
+    workspace = { ...workspace, buffers: workspace.buffers.map(b => b.id === id ? { ...b, ...update } : b) };
   }
-
-  /** Blur composition and freeze input during close/export; failed close resumes the same editor state. */
-  function setFrozen(value: boolean) {
-    if (value) annotation = undefined;
-    if (value) view?.contentDOM.blur();
-    frozen = value;
-    saver?.pause(value);
-    view?.dispatch({ effects: editabilitySlot.reconfigure([EditorState.readOnly.of(value), EditorView.editable.of(!value)]) });
-  }
-
-  /** Retain selection, scroll, and preferences while preserving other saved tabs for ticket 004. */
-  function stageSession() {
-    if (!saver) return;
-    if (!view || !note) { saver.setSession(session); return; }
+  function capture() {
+    if (!view || !viewId) return;
     const selection = view.state.selection.main;
-    session = { ...session, wordWrap: wrap, activeNoteId: note.id,
-      tabs: session.tabs.map(tab => tab.noteId === note!.id ? { ...tab, anchor: selection.anchor, head: selection.head, scrollTop: view!.scrollDOM.scrollTop } : tab) };
-    saver.setSession(session);
+    patch(viewId, { text: view.state.doc.toString(), metadata: view.state.field(metadataField), anchor: selection.anchor, head: selection.head, scrollTop: view.scrollDOM.scrollTop });
   }
-
-  /** Convert editor state back to ordered source/image blocks before scheduling a durable write. */
-  function stageNote(immediate = false) {
-    if (!saver || !view || !note) return;
-    const document = decodeDocument({ text: view.state.doc.toString(), images: view.state.field(imageField) });
-    if (automatic.has(note.id)) { note.title = automaticTitle(document); titles = { ...titles, [note.id]: note.title }; }
-    note.document = document;
-    note.language = language;
-    saver.edit(note.id, { title: note.title, language, document }, immediate);
+  function checkpoint(): Promise<void> {
+    capture();
+    clearTimeout(timer); timer = undefined;
+    const snapshot = JSON.stringify(workspace);
+    const pending = snapshotQueue.catch(() => {}).then(() => files.operation<void>({ kind: 'snapshot', snapshot }));
+    snapshotQueue = pending;
+    void pending.then(() => { recoveryError = ''; }, error => { recoveryError = errorMessage(error); });
+    return pending;
   }
-
-  /** Load metadata in bounded pages; normalize only missing/deleted IDs, never storage failures. */
-  async function loadWorkspace() {
-    loading = true;
-    startupError = '';
-    try {
-      const saved = await storage.loadSession();
-      const summaries: storage.NoteSummary[] = [];
-      for (let offset = 0; ; offset += 200) {
-        const page = await storage.listNotes(200, offset);
-        summaries.push(...page.filter(item => item.deletedAt === null));
-        if (page.length < 200) break;
+  function scheduleRecovery() {
+    if (timer || !started) return;
+    timer = setTimeout(() => { timer = undefined; void checkpoint().catch(() => {}); }, 250);
+  }
+  function syntax(language: files.Language) {
+    return language === 'javascript' ? javascript({ jsx: true }) : language === 'typescript' ? javascript({ typescript: true, jsx: true }) : language === 'json' ? json() : language === 'html' ? html() : language === 'markdown' ? markdown() : language === 'css' ? css() : language === 'php' ? php() : [];
+  }
+  async function imageBlob(buffer: files.Buffer, reference: AttachmentId): Promise<Blob> {
+    const bytes = await files.operation<number[]>({ kind: 'image', document: buffer.path, reference });
+    return new Blob([new Uint8Array(bytes)]);
+  }
+  function unmount() {
+    capture();
+    if (view && viewId) states.set(viewId, view.state);
+    view?.destroy(); view = undefined; viewId = undefined;
+  }
+  function mount(id: string | null) {
+    if (id === viewId) return;
+    unmount();
+    workspace = { ...workspace, active: id };
+    const buffer = workspace.buffers.find(b => b.id === id);
+    if (!buffer) return;
+    const language = files.languageFor(buffer.path);
+    viewId = buffer.id;
+    const state = states.get(buffer.id) ?? referenceState(buffer.text, buffer.metadata, [
+      lineNumbers(), drawSelection(), highlightActiveLine(), indentOnInput(), bracketMatching(), cursorSyntaxExtension, search(), syntax(language),
+      referencePresentation(language, reference => imageBlob(workspace.buffers.find(b => b.id === buffer.id) ?? buffer, reference), openAnnotation),
+      wrapSlot.of(workspace.wrap ? EditorView.lineWrapping : []), editable.of(EditorView.editable.of(!frozen && !busy)),
+      EditorView.contentAttributes.of({ 'aria-label': 'File editor' }),
+      keymap.of([{ key: 'Mod-f', run: () => { void openFind(); return true; } }, indentWithTab, ...defaultKeymap, ...historyKeymap]),
+      EditorView.domEventHandlers({ paste(event) { const text = event.clipboardData?.getData('text/plain') ?? ''; event.preventDefault(); run(() => pasteImage(text)); return true; }, scroll() { capture(); scheduleRecovery(); return false; } }),
+      EditorView.updateListener.of(update => { if (update.docChanged || update.selectionSet || update.startState.field(metadataField) !== update.state.field(metadataField)) { capture(); scheduleRecovery(); } })
+    ]);
+    view = new EditorView({ parent: host, state });
+    view.dispatch({ effects: [wrapSlot.reconfigure(workspace.wrap ? EditorView.lineWrapping : []), editable.reconfigure(EditorView.editable.of(!frozen && !busy))], selection: { anchor: Math.min(buffer.anchor, state.doc.length), head: Math.min(buffer.head, state.doc.length) } });
+    view.scrollDOM.scrollTop = buffer.scrollTop;
+    scheduleRecovery();
+  }
+  function run(work: () => Promise<void> | void) {
+    if (busy || frozen || loading || annotation || startupError) return;
+    busy = true;
+    view?.dispatch({ effects: editable.reconfigure(EditorView.editable.of(false)) });
+    action = Promise.resolve().then(work).catch(error => { notice = errorMessage(error); }).finally(() => {
+      busy = false;
+      view?.dispatch({ effects: editable.reconfigure(EditorView.editable.of(!frozen)) });
+    });
+  }
+  async function newFile() {
+    if (workspace.buffers.length >= 1000) throw new Error('Close a tab before opening more than 1,000 buffers.');
+    capture();
+    const buffer = files.untitled();
+    workspace = { ...workspace, buffers: [...workspace.buffers, buffer] };
+    mount(buffer.id); await checkpoint();
+  }
+  async function openFile(path?: string, line?: number) {
+    const selected = path ?? await files.picker('open');
+    if (!selected) return;
+    const disk = await files.readFile(selected);
+    const existing = workspace.buffers.find(b => b.path?.toLowerCase() === disk.path.toLowerCase());
+    if (!existing && workspace.buffers.length >= 1000) throw new Error('Close a tab before opening more than 1,000 buffers.');
+    if (!existing) workspace = { ...workspace, buffers: [...workspace.buffers, files.opened(disk)] };
+    mount(existing?.id ?? workspace.buffers.at(-1)!.id);
+    if (line && view) { const target = view.state.doc.line(Math.min(line, view.state.doc.lines)); view.dispatch({ selection: { anchor: target.from }, scrollIntoView: true }); }
+    await checkpoint();
+  }
+  function documentReferences(buffer: files.Buffer) {
+    const language = files.languageFor(buffer.path);
+    const state = referenceState(buffer.text,buffer.metadata,syntax(language));
+    if (language !== 'plaintext' && !ensureSyntaxTree(state,state.doc.length,1000)) throw new Error('Source parsing is incomplete. Try saving again.');
+    return sourceImages(state,language).map(image => ({ from: image.from, to: image.to, path: image.block.attachmentId }));
+  }
+  async function saveFile(id = workspace.active, saveAs = false): Promise<boolean> {
+    capture();
+    const buffer = workspace.buffers.find(b => b.id === id);
+    if (!buffer) return false;
+    // Recovery must succeed before a multi-file save; a partial disk failure remains recoverable.
+    await checkpoint();
+    let disk: files.DiskDocument;
+    if (!buffer.path || saveAs || buffer.external === 'deleted') {
+      const destination = await files.picker('save', buffer.path ? files.title(buffer) : 'Untitled.md');
+      if (!destination) return false;
+      const targetLanguage = files.languageFor(destination);
+      const oldLanguage = files.languageFor(buffer.path);
+      const refs = documentReferences(buffer);
+      let source = buffer.text;
+      // Explicit Save As may change syntax, but must never place raw image markers in JSON.
+      if (refs.length && targetLanguage !== oldLanguage) {
+        if (targetLanguage === 'json') throw new Error('JSON cannot contain image comments. Choose another file type.');
+        if (targetLanguage !== 'markdown' && targetLanguage !== 'plaintext' && refs.some(ref => {
+          const start = source.lastIndexOf('\n',ref.from-1)+1;
+          const end = source.indexOf('\n',ref.to);
+          return source.slice(start,ref.from).trim() || source.slice(ref.to,end < 0 ? source.length : end).trim();
+        })) throw new Error('Put each image reference on its own line before saving as code.');
+        for (const ref of [...refs].reverse()) source = source.slice(0, ref.from) + imageSyntax(ref.path, targetLanguage) + source.slice(ref.to);
       }
-      if (disposed) return;
-      titles = Object.fromEntries(summaries.map(item => [item.id, item.title]));
-      session = normalizeSession(saved.state ?? emptySession(), new Set(summaries.map(item => item.id)));
-      wrap = session.wordWrap;
-      saver = new Autosave(storage, saved, refreshStatus);
-      saver.pause(frozen);
-      if (!saved.state) {
-        if (summaries.length) session = openTab(session, summaries[0].id);
-        else {
-          const created = await storage.createNote({ title: 'Untitled', language: 'plaintext', document: { version: 1, blocks: [{ kind: 'text', text: '' }] } });
-          rememberNote(created);
-          session = openTab(session, created.id);
+      const targetRefs = targetLanguage === oldLanguage ? refs : documentReferences({ ...buffer, path: destination, text: source });
+      if (targetRefs.length < refs.length) throw new Error('Image comments are not valid in this file type or source context. Choose another type or adjust the source.');
+      disk = await files.operation<files.DiskDocument>({ kind: 'package', destination, text: source, metadata: buffer.metadata, origin: buffer.path?.replace(/[/\\][^/\\]+$/, '') ?? null, assets: targetRefs });
+    } else {
+      if (buffer.external) throw new Error('Resolve the external change with Reload from Disk or Save As.');
+      disk = await files.operation<files.DiskDocument>({ kind: 'save', path: buffer.path, expected: buffer.revision, text: buffer.text, metadata: buffer.metadata, assets: documentReferences(buffer) });
+    }
+    const reset = buffer.path !== disk.path || buffer.text !== disk.text || files.fingerprint(buffer.text,buffer.metadata) !== files.fingerprint(disk.text,disk.metadata);
+    if (reset && viewId === buffer.id) { view?.destroy(); view = undefined; viewId = undefined; }
+    if (reset) states.delete(buffer.id);
+    patch(buffer.id, { ...disk, baseline: files.fingerprint(disk.text, disk.metadata), external: null });
+    if (reset && workspace.active === buffer.id) mount(buffer.id);
+    await checkpoint(); notice = 'Saved.'; return true;
+  }
+  async function closeFile(id: string, choice?: 'save' | 'discard') {
+    capture();
+    const buffer = workspace.buffers.find(b => b.id === id);
+    if (!buffer) return;
+    if (!choice && files.closeDecision(buffer) === 'prompt') { closeTarget = id; closeDialog.showModal(); return; }
+    if (choice === 'save' && !await saveFile(id)) return;
+    capture();
+    const previous = workspace;
+    if (viewId === id) unmount();
+    workspace = files.removeBuffer(workspace, id);
+    states.delete(id);
+    closeDialog.close(); closeTarget = null;
+    mount(workspace.active);
+    try { await checkpoint(); }
+    catch (error) { unmount(); workspace = previous; mount(previous.active); throw error; }
+    closed.push(buffer.path ? { ...buffer, baseline: buffer.baseline } : files.untitled());
+  }
+  async function reopen() {
+    const buffer = closed.at(-1);
+    if (!buffer) return;
+    if (buffer.path) await openFile(buffer.path); else await newFile();
+    closed.pop();
+  }
+  async function refresh() {
+    if (workspace.root) entries = await files.operation<files.Entry[]>({ kind: 'browse', root: workspace.root, query: panel === 'search' ? query : '' });
+    else entries = [];
+  }
+  async function openFolder() { const root = await files.picker('folder'); if (root) { workspace = { ...workspace, root, sidebar: true }; await refresh(); await checkpoint(); } }
+  async function showPanel(next: 'explorer' | 'search') { panel = next; workspace = { ...workspace, sidebar: true }; await refresh(); scheduleRecovery(); }
+  function wrap() { workspace = { ...workspace, wrap: !workspace.wrap }; view?.dispatch({ effects: wrapSlot.reconfigure(workspace.wrap ? EditorView.lineWrapping : []) }); scheduleRecovery(); }
+  async function openFind() { findVisible = true; await tick(); document.getElementById('find')?.focus(); }
+  function find(event: SubmitEvent) { event.preventDefault(); if (view) { view.dispatch({ effects: setSearchQuery.of(new SearchQuery({ search: findQuery, literal: true })) }); findNext(view); } }
+  async function pasteImage(fallback = '') {
+    if (!view || !active) return;
+    const target = view, buffer = active, language = files.languageFor(buffer.path);
+    const bytes = await invoke<number[] | null>('file_clipboard');
+    if (!bytes) { if (fallback) target.dispatch(target.state.replaceSelection(fallback)); return; }
+    if (language !== 'plaintext' && !ensureSyntaxTree(target.state, target.state.doc.length, 1000)) throw new Error('Source parsing is incomplete. Try inserting again.');
+    insertion(target.state, language, './assets/validation.png'); // Validate before writing an asset.
+    // Always stage new originals in recovery. Save adopts them only after safe packaging/materialization.
+    const reference = await files.operation<string>({ kind: 'putImage', document: null, bytes });
+    const metadata = { ...target.state.field(metadataField), images: { ...target.state.field(metadataField).images, [reference]: { id: crypto.randomUUID(), annotations: [] } } };
+    target.dispatch({ ...insertion(target.state, language, reference), effects: setMetadata.of(metadata) });
+    await checkpoint();
+  }
+  async function openAnnotation(block: ImageBlock) {
+    if (busy || frozen || !active) return;
+    run(async () => { annotation = { block, blob: await imageBlob(active!, block.attachmentId) }; });
+  }
+  function annotate(annotations: readonly Annotation[]) {
+    if (!view || !annotation) return;
+    const metadata = view.state.field(metadataField), reference = annotation.block.attachmentId;
+    view.dispatch({ effects: setMetadata.of({ ...metadata, images: { ...metadata.images, [reference]: { id: annotation.block.id, annotations } } }) });
+  }
+  async function outputAnnotation(action: 'copy' | 'export', annotations: readonly Annotation[], width: number, height: number) {
+    if (!annotation) throw new Error('Image is unavailable');
+    const blob = annotation.blob;
+    outputWork = (async () => {
+      const png = await flattenImage(blob, annotations, width, height);
+      if (action === 'copy') { await storage.copyImage(png); return 'Image copied.'; }
+      return await storage.exportImage(png) ? 'PNG exported.' : 'Export cancelled.';
+    })();
+    try { return await outputWork; } finally { outputWork = undefined; }
+  }
+  async function reloadDisk() {
+    if (!active?.path) return;
+    if (files.modified(active) && !window.confirm('Discard this buffer’s unsaved edits and reload from disk?')) return;
+    const disk = await files.readFile(active.path), id = active.id;
+    unmount(); states.delete(id); patch(id, { ...disk, baseline: files.fingerprint(disk.text, disk.metadata), external: null }); mount(id); await checkpoint();
+  }
+  async function poll() {
+    if (polling || busy || frozen || loading || annotation || startupError) return;
+    polling = true;
+    try {
+      capture();
+      for (const buffer of [...workspace.buffers]) {
+        if (!buffer.path) continue;
+        let next: files.Buffer;
+        try { next = files.reconcile(buffer, await files.readFile(buffer.path)); }
+        catch (error) {
+          // Only an actual not-found is deletion. Permission/metadata failures keep the buffer intact.
+          next = { ...buffer, external: typeof error === 'object' && error !== null && 'code' in error && error.code === 'not_found' ? 'deleted' : 'unavailable' };
+        }
+        if (busy || frozen) break;
+        if (next.text !== buffer.text || files.fingerprint(next.text,next.metadata) !== files.fingerprint(buffer.text,buffer.metadata)) {
+          // Recheck after await: a new local generation always wins over a background reload.
+          const current = workspace.buffers.find(b => b.id === buffer.id);
+          capture();
+          const latest = workspace.buffers.find(b => b.id === buffer.id);
+          if (!current || !latest || files.modified(latest) || latest.revision !== buffer.revision) { if (latest) patch(buffer.id, { external: 'changed' }); continue; }
+          const wasActive = viewId === buffer.id;
+          if (wasActive) unmount();
+          states.delete(buffer.id); patch(buffer.id, next); if (wasActive) mount(buffer.id);
+        } else {
+          capture();
+          const latest = workspace.buffers.find(b => b.id === buffer.id);
+          if (latest && latest.revision === buffer.revision) patch(buffer.id, { external: next.external,
+            ...(!files.modified(latest) ? { revision: next.revision, baseline: next.baseline } : {}) });
         }
       }
-      if (session.activeNoteId) await mountNote(session.activeNoteId);
-      stageSession();
-      if (session.sidebarVisible) await browseLibrary();
-      refreshStatus();
-    } catch (error) {
-      startupError = errorMessage(error);
-      throw error;
-    } finally { loading = false; }
+      if (workspace.sidebar) await refresh();
+      scheduleRecovery();
+    } catch (error) { notice = errorMessage(error); }
+    finally { polling = false; }
   }
-
-  /** Register each note once; explicit custom titles remain stable across content edits. */
-  function rememberNote(loaded: storage.Note) {
-    notes.set(loaded.id, loaded);
-    saver!.register(loaded);
-    if (loaded.title === automaticTitle(loaded.document)) automatic.add(loaded.id);
-    titles = { ...titles, [loaded.id]: loaded.title };
-  }
-
-  /** Cache immutable editor states, including history; only one EditorView exists at a time. */
-  function unmountNote() {
-    if (!view || !note) return;
-    stageSession();
-    states.set(note.id, view.state);
-    view.scrollDOM.removeEventListener('scroll', stageSession);
-    view.destroy(); view = undefined; note = undefined;
-  }
-
-  function getLangBadge(lang?: storage.NoteLanguage): { label: string; cls: string } {
-    switch (lang) {
-      case 'typescript': return { label: 'TS', cls: 'ts' };
-      case 'javascript': return { label: 'JS', cls: 'js' };
-      case 'markdown': return { label: 'MD', cls: 'md' };
-      case 'json': return { label: '{}', cls: 'json' };
-      case 'html': return { label: '<>', cls: 'html' };
-      default: return { label: 'TXT', cls: 'txt' };
-    }
-  }
-
-  /** Prepare originals before replacing the active view so load failures preserve current work. */
-  async function mountNote(id: storage.NoteId) {
-      if (view && note?.id === id) return;
-      if (!session.tabs.some(tab => tab.noteId === id) && session.tabs.length >= 1000) throw new Error('Close a tab before opening more than 1000 tabs');
-      let loaded = notes.get(id);
-      if (!loaded) {
-        loaded = await storage.loadNote(id);
-        if (loaded.deletedAt !== null) throw new Error('This note is in Trash');
-        rememberNote(loaded);
-      }
-      if (disposed) return;
-      unmountNote();
-      session = openTab(session, id);
-      note = loaded;
-      language = loaded.language;
-      renaming = false;
-      const tab = session.tabs.find(tab => tab.noteId === id)!;
-      const idForView = id;
-      view = new EditorView({ parent: host, state: createNoteState(loaded.document, [
-        lineNumbers(), drawSelection(), highlightActiveLine(), indentOnInput(), bracketMatching(),
-        cursorSyntaxExtension, search(), imagePresentation(async id => {
-          const cached = sources.get(id);
-          if (cached) return cached;
-          const original = await storage.loadAttachment(idForView, id);
-          return new Blob([new Uint8Array(original.bytes)], { type: original.mimeType });
-        }, openAnnotation),
-        EditorView.contentAttributes.of({ 'aria-label': 'Note editor' }),
-        EditorView.domEventHandlers({ paste(event) { return pasteScreenshot(event); } }),
-        keymap.of([{ key: 'Mod-f', run: () => { void openFind(); return true; } }, indentWithTab, ...editingKeys, ...historyKeymap]),
-        languageSlot.of(languageExtension()), wrapSlot.of(wrap ? EditorView.lineWrapping : []),
-        editabilitySlot.of([EditorState.readOnly.of(frozen), EditorView.editable.of(!frozen)]),
-        EditorView.updateListener.of(update => {
-          const imagesChanged = update.startState.field(imageField) !== update.state.field(imageField);
-          if (update.docChanged || imagesChanged) stageNote(!update.docChanged && imagesChanged);
-          if (update.docChanged || update.selectionSet) stageSession();
-        })
-      ]) });
-      const cached = states.get(id);
-      if (cached) {
-        view.setState(cached);
-        view.dispatch({ effects: [languageSlot.reconfigure(languageExtension()), wrapSlot.reconfigure(wrap ? EditorView.lineWrapping : []), editabilitySlot.reconfigure([EditorState.readOnly.of(frozen), EditorView.editable.of(!frozen)])] });
-      } else view.dispatch({ selection: { anchor: Math.min(tab.anchor, view.state.doc.length), head: Math.min(tab.head, view.state.doc.length) } });
-      view.scrollDOM.scrollTop = tab.scrollTop;
-      view.scrollDOM.addEventListener('scroll', stageSession);
-      stageSession();
-  }
-
-  /** Serialize tab operations and include pending note creation/loading in the close handshake. */
-  function runTab(action: () => Promise<void> | void) {
-    if (busy || frozen || loading || insertion || annotation || startupError) return;
-    busy = true;
-    transition = Promise.resolve().then(action).catch(error => { notice = errorMessage(error); }).finally(() => { busy = false; });
-  }
-
-  /** Create durable identity before opening a fresh tab; failed creation never adds a phantom tab. */
-  async function newNote() {
-    if (session.tabs.length >= 1000) throw new Error('Close a tab before creating another note');
-    const created = await storage.createNote({ title: 'Untitled', language: 'plaintext', document: { version: 1, blocks: [{ kind: 'text', text: '' }] } });
-    rememberNote(created);
-    await mountNote(created.id);
-  }
-
-  /** Close only the tab, retaining source, autosave generations, history, and reopen metadata. */
-  async function closeNote(id: storage.NoteId) {
-    stageSession();
-    const tab = session.tabs.find(tab => tab.noteId === id);
-    if (!tab) return;
-    const next = closeTab(session, id);
-    if (session.activeNoteId === id && next.activeNoteId) await mountNote(next.activeNoteId);
-    else if (session.activeNoteId === id) unmountNote();
-    closed = [...closed, tab];
-    session = next;
-    stageSession();
-  }
-
-  /** Reopen the most recently closed tab with its pin, selection, scroll, and cached undo state. */
-  async function reopenNote() {
-    const tab = closed.at(-1);
-    if (!tab) return;
-    await mountNote(tab.noteId);
-    session = openTab(closeTab(session, tab.noteId), tab.noteId, tab);
-    closed = closed.slice(0, -1);
-    if (view) view.scrollDOM.scrollTop = tab.scrollTop;
-    stageSession();
-  }
-
-  /** Persist tab metadata immediately into autosave's current session before any possible exit. */
-  function alterTab(id: storage.NoteId, action: 'pin' | -1 | 1) {
-    stageSession();
-    session = changeTab(session, id, action);
-    stageSession();
-  }
-
-  /** Commit a bounded custom title without changing source or undo history. */
-  function renameNote(event: SubmitEvent) {
-    event.preventDefault();
-    if (!note || frozen) return;
-    const title = renameValue.trim();
-    if (!title || new TextEncoder().encode(title).length > 1024) { notice = 'Title must contain 1–1024 UTF-8 bytes.'; return; }
-    automatic.delete(note.id);
-    note.title = title;
-    titles = { ...titles, [note.id]: title };
-    renaming = false;
-    stageNote();
-  }
-
-  async function showSidebarPanel(panel: 'explorer' | 'search', toggle = false) {
-    if (toggle && session.sidebarVisible && sidebarPanel === panel) { await toggleSidebar(); return; }
-    if (sidebarPanel !== panel) { libraryQuery = ''; trash = false; }
-    sidebarPanel = panel;
-    session = { ...session, sidebarVisible: true }; stageSession();
-    await browseLibrary();
-    await tick();
-    document.getElementById(panel === 'search' ? 'library-search' : 'explorer-panel')?.focus();
-  }
-
-  /** Persist optional sidebar visibility even when every tab is closed. */
-  async function toggleSidebar() {
-    session = { ...session, sidebarVisible: !session.sidebarVisible }; stageSession();
-    if (session.sidebarVisible) await browseLibrary();
-  }
-
-  /** Flush current edits before searching so results include the latest source and custom titles. */
-  async function browseLibrary(append = false) {
-    await saver!.flush();
-    const page = await storage.browseNotes(trash, libraryQuery, append ? library.length : 0);
-    library = append ? [...library, ...page] : page;
-    libraryMore = page.length === 100;
-  }
-
-  /** Freeze editor input, drain saves, then apply a revision-checked native Trash transaction. */
-  async function lifecycle(item: storage.NoteSummary, action: 'trash' | 'restore' | 'purge') {
+  async function exit() {
+    if (exitWork) return exitWork;
+    frozen = true;
     view?.contentDOM.blur();
-    view?.dispatch({ effects: editabilitySlot.reconfigure([EditorState.readOnly.of(true), EditorView.editable.of(false)]) });
-    try {
-      stageSession();
-      await saver!.flush();
-      const saved = await storage.changeNoteLifecycle(item.id, saver!.revision(item.id) ?? item.revision, action);
-      if (note?.id === item.id) {
-        view?.scrollDOM.removeEventListener('scroll', stageSession);
-        view?.destroy(); view = undefined; note = undefined;
+    view?.dispatch({ effects: editable.reconfigure(EditorView.editable.of(false)) });
+    exitWork = (async () => {
+      try {
+        try { await boot; } catch (error) { if (started) throw error; }
+        await action; await outputWork?.catch(() => {}); annotation = undefined;
+        // A failed recovery load has admitted no edits. Exit without replacing the original recovery file.
+        if (started) await checkpoint();
+        await storage.finishExit(false);
       }
-      saver!.forget(item.id, saved);
-      notes.delete(item.id); states.delete(item.id); automatic.delete(item.id);
-      closed = closed.filter(tab => tab.noteId !== item.id);
-      session = saved.state ?? closeTab(session, item.id);
-      if (action !== 'restore') { const next = { ...titles }; delete next[item.id]; titles = next; }
-      else titles = { ...titles, [item.id]: item.title };
-      purge = undefined;
-      if (session.activeNoteId) await mountNote(session.activeNoteId);
-      await browseLibrary();
-    } finally {
-      view?.dispatch({ effects: editabilitySlot.reconfigure([EditorState.readOnly.of(frozen), EditorView.editable.of(!frozen)]) });
-    }
+      catch (error) { notice = `Could not preserve work for exit: ${errorMessage(error)}. Keep editing and retry.`; await storage.cancelExit(); frozen = false; view?.dispatch({ effects: editable.reconfigure(EditorView.editable.of(true)) }); }
+      finally { exitWork = undefined; }
+    })();
+    return exitWork;
   }
-
-  /** Roving tab focus supports arrows/Home/End without requiring pointer input. */
-  function tabKey(event: KeyboardEvent, index: number) {
-    const target = event.key === 'Home' ? 0 : event.key === 'End' ? session.tabs.length - 1
-      : event.key === 'ArrowRight' ? (index + 1) % session.tabs.length
-      : event.key === 'ArrowLeft' ? (index + session.tabs.length - 1) % session.tabs.length : -1;
-    if (target < 0) return;
-    event.preventDefault();
-    const id = session.tabs[target].noteId;
-    runTab(async () => { await mountNote(id); document.getElementById(`tab-${id}`)?.focus(); });
+  function menu(event: MouseEvent, id: string) {
+    const element = document.getElementById(id)!;
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    element.style.left = `${rect.left}px`; element.style.top = `${rect.bottom}px`; element.showPopover();
+    element.querySelector<HTMLButtonElement>('button')?.focus();
   }
-
-  /** Subscribe before loading so startup close requests are retained by the native handshake. */
+  function command(work: () => Promise<void> | void) { document.querySelectorAll<HTMLElement>('.command-menu').forEach(m => m.hidePopover()); run(work); }
+  function tabContext(event: MouseEvent, id: string) { event.preventDefault(); menuBuffer = id; tabMenu.style.left = `${Math.min(event.clientX,window.innerWidth-240)}px`; tabMenu.style.top = `${event.clientY}px`; tabMenu.showPopover(); }
+  function alterTab(direction: 'pin' | -1 | 1) {
+    const buffers = [...workspace.buffers], index = buffers.findIndex(b => b.id === menuBuffer);
+    if (index < 0) return;
+    if (direction === 'pin') buffers[index] = { ...buffers[index], pinned: !buffers[index].pinned };
+    else if (buffers[index + direction]?.pinned === buffers[index].pinned) [buffers[index], buffers[index + direction]] = [buffers[index + direction], buffers[index]];
+    buffers.sort((a,b) => Number(b.pinned)-Number(a.pinned)); workspace = { ...workspace, buffers }; scheduleRecovery();
+  }
+  function shortcut(event: KeyboardEvent) {
+    if (annotation || closeDialog?.open || event.isComposing || event.altKey && event.key.toLowerCase() !== 'z') return;
+    const key = event.key.toLowerCase();
+    if ((event.ctrlKey || event.metaKey) && (key === 's' || key === 'o')) { event.preventDefault(); run(() => key === 's' ? saveFile(workspace.active,event.shiftKey).then(() => {}) : event.shiftKey ? openFolder() : openFile()); return; }
+    const action = tabShortcut(event); if (!action) return; event.preventDefault();
+    if (action === 'quit') { void storage.requestExit(); return; }
+    run(async () => {
+      if (action === 'new') await newFile(); else if (action === 'close' && workspace.active) await closeFile(workspace.active);
+      else if (action === 'reopen') await reopen(); else if (action === 'wrap') wrap();
+      else if (action === 'sidebar') { workspace = { ...workspace, sidebar: !workspace.sidebar }; await refresh(); scheduleRecovery(); }
+      else if (action === 'explorer' || action === 'search') await showPanel(action);
+      else if (workspace.buffers.length) { const index = workspace.buffers.findIndex(b => b.id === workspace.active); mount(workspace.buffers[(index+(action === 'previous' ? workspace.buffers.length-1 : 1))%workspace.buffers.length].id); }
+    });
+  }
   onMount(() => {
     let unlisten: (() => void) | undefined;
-    let unlistenBackup: (() => void) | undefined;
-    bootstrap = (async () => {
-      unlisten = await listen('flush-before-exit', () => { void exit.request(); });
+    boot = (async () => {
+      unlisten = await listen('flush-before-exit', () => { void exit(); });
       if (disposed) { unlisten(); return; }
-      unlistenBackup = await listen<storage.BackupStatus>('backup-status', event => { backupStatus = event.payload; });
-      if (disposed) { unlistenBackup(); return; }
-      backupStatus = await storage.backupStatus();
-      if (await storage.exitReady()) void exit.request();
-      await loadWorkspace();
+      if (await storage.exitReady()) void exit();
+      const recovered = await files.operation<files.Workspace | null>({ kind: 'recover' });
+      if (disposed) return;
+      if (recovered) {
+        workspace = files.recovered(recovered);
+        for (const buffer of [...workspace.buffers]) {
+          if (!buffer.path) continue;
+          try { patch(buffer.id,files.reconcile(buffer,await files.readFile(buffer.path))); }
+          catch (error) { patch(buffer.id,{ external: typeof error === 'object' && error !== null && 'code' in error && error.code === 'not_found' ? 'deleted' : 'unavailable' }); }
+        }
+      }
+      started = true;
+      mount(workspace.active);
+      if (!recovered) await newFile();
+      try { await refresh(); } catch (error) { notice = errorMessage(error); }
     })();
-    void bootstrap.catch(error => { startupError = errorMessage(error); loading = false; });
-    window.addEventListener('keydown', quitShortcut);
-    // Destroy the view's listeners, observers, and widgets when the host unmounts.
-    return () => {
-      disposed = true;
-      saver?.stop();
-      unlisten?.();
-      unlistenBackup?.();
-      window.removeEventListener('keydown', quitShortcut);
-      view?.scrollDOM.removeEventListener('scroll', stageSession);
-      view?.destroy(); view = undefined;
-      sources.clear();
-    };
+    void boot.catch(error => { startupError = errorMessage(error); }).finally(() => { loading = false; void poll(); });
+    const interval = setInterval(() => { void poll(); }, 2000);
+    window.addEventListener('keydown', shortcut);
+    const focus = () => { void poll(); }; window.addEventListener('focus', focus);
+    return () => { disposed = true; clearInterval(interval); clearTimeout(timer); unlisten?.(); window.removeEventListener('keydown',shortcut); window.removeEventListener('focus',focus); view?.destroy(); };
   });
-
-  /** Retry failed startup without duplicating native listeners or replacing an editable note. */
-  function retryStartup() {
-    saver?.stop();
-    view?.destroy(); view = undefined;
-    notes.clear(); states.clear(); automatic.clear();
-    sources.clear();
-    bootstrap = loadWorkspace();
-    void bootstrap.catch(() => {});
-  }
-
-  /** App shortcuts leave OS-reserved combinations and IME input untouched. */
-  function quitShortcut(event: KeyboardEvent) {
-    if (annotation || backupDialog?.open) return;
-    const action = tabShortcut(event);
-    if (!action) return;
-    event.preventDefault();
-    if (action === 'quit') { void storage.requestExit().catch(error => { saveError = errorMessage(error); }); return; }
-    runTab(async () => {
-      if (action === 'new') await newNote();
-      else if (action === 'close' && session.activeNoteId) await closeNote(session.activeNoteId);
-      else if (action === 'reopen') await reopenNote();
-      else if (action === 'sidebar') await toggleSidebar();
-      else if (action === 'explorer' || action === 'search') await showSidebarPanel(action);
-      else if (action === 'wrap') toggleWrap();
-      else if (session.tabs.length) {
-        const index = session.tabs.findIndex(tab => tab.noteId === session.activeNoteId);
-        await mountNote(session.tabs[(index + (action === 'previous' ? session.tabs.length - 1 : 1)) % session.tabs.length].noteId);
-      }
-    });
-  }
-
-  /** Select syntax extensions from persisted identifiers rather than UI display labels. */
-  function languageExtension() {
-    return language === 'javascript' ? javascript() : language === 'typescript' ? javascript({ typescript: true })
-      : language === 'json' ? json() : language === 'html' ? html() : language === 'markdown' ? markdown() : [];
-  }
-
-  /** Reconfigure syntax while retaining content, selections, and undo history, then save the preference. */
-  function changeLanguage() {
-    view?.dispatch({ effects: languageSlot.reconfigure(languageExtension()) });
-    stageNote();
-  }
-
-  /** Change wrapping without recreating the mounted editor and persist session preferences. */
-  function toggleWrap() {
-    wrap = !wrap;
-    view?.dispatch({ effects: wrapSlot.reconfigure(wrap ? EditorView.lineWrapping : []) });
-    stageSession();
-  }
-
-  /** Find literal text, rejecting matches that include actual image positions. */
-  function find(event: SubmitEvent) {
-    event.preventDefault();
-    if (!view || frozen) return;
-    view.dispatch({ effects: setSearchQuery.of(textSearch(query)) });
-    findNext(view);
-  }
-
-  /** Hold the target selection stable until native validation/storage finishes; failures never edit source. */
-  function pasteScreenshot(event?: ClipboardEvent): boolean {
-    event?.preventDefault();
-    if (!view || frozen || insertion || busy || loading || view.state.readOnly) return true;
-    const target = view;
-    const selection = target.state.selection;
-    const text = event?.clipboardData?.getData('text/plain') ?? '';
-    inserting = true;
-    target.dispatch({ effects: editabilitySlot.reconfigure([EditorState.readOnly.of(true), EditorView.editable.of(false)]) });
-    insertion = (async () => {
-      const original = await storage.pasteImage();
-      if (disposed || view !== target) return;
-      target.dispatch({ selection });
-      if (original) {
-        sources.set(original.id, new Blob([new Uint8Array(original.bytes)], { type: original.mimeType }));
-        const block: ImageBlock = { kind: 'image', id: crypto.randomUUID() as ImageId, attachmentId: original.id, annotations: [] };
-        target.dispatch(insertImage(target.state, block));
-        stageNote(true);
-      } else if (text) target.dispatch(target.state.replaceSelection(text), { userEvent: 'input.paste' });
-    })().catch(error => { notice = errorMessage(error); }).finally(() => {
-      inserting = false; insertion = undefined;
-      if (!disposed && view === target) {
-        target.dispatch({ effects: editabilitySlot.reconfigure([EditorState.readOnly.of(frozen), EditorView.editable.of(!frozen)]) });
-        if (!frozen) target.focus();
-      }
-    });
-    return true;
-  }
-
-  /** Load the immutable original before opening; keep tab identity stable while native I/O is pending. */
-  function openAnnotation(block: ImageBlock) {
-    if (!note || !view || frozen || busy || insertion || annotation) return;
-    const target = view, noteId = note.id;
-    inserting = true;
-    target.dispatch({ effects: editabilitySlot.reconfigure([EditorState.readOnly.of(true), EditorView.editable.of(false)]) });
-    insertion = (async () => {
-      let blob = sources.get(block.attachmentId);
-      if (!blob) {
-        const original = await storage.loadAttachment(noteId, block.attachmentId);
-        blob = new Blob([new Uint8Array(original.bytes)], { type: original.mimeType });
-      }
-      if (!disposed && !frozen && view === target) annotation = { block, blob };
-    })().catch(error => { notice = errorMessage(error); }).finally(() => {
-      inserting = false; insertion = undefined;
-      if (!disposed && view === target) target.dispatch({ effects: editabilitySlot.reconfigure([EditorState.readOnly.of(frozen), EditorView.editable.of(!frozen)]) });
-    });
-  }
-
-  /** Return to the unchanged editor selection and scroll; only unfinished canvas gestures are discarded. */
-  function closeAnnotation() { annotation = undefined; view?.focus(); }
-
-  /** Export the current completed snapshot, independent of save acknowledgements; guarded exit awaits native output. */
-  function outputAnnotation(action: 'copy' | 'export', annotations: readonly Annotation[], width: number, height: number): Promise<string> {
-    if (!annotation || frozen || imageOutput) return Promise.reject(new Error('Image output is unavailable. Reopen the image and retry.'));
-    const original = annotation.blob;
-    const pending = (async () => {
-      const png = await flattenImage(original, annotations, width, height);
-      if (action === 'copy') { await storage.copyImage(png); return 'Image copied.'; }
-      return await storage.exportImage(png) ? 'PNG exported.' : 'PNG export cancelled.';
-    })();
-    imageOutput = pending;
-    return pending.finally(() => { imageOutput = undefined; });
-  }
-
-  /** Retry saving in place; success preserves current content and undo history. */
-  async function retrySave() {
-    try { await saver?.flush(); } catch { /* Autosave retains the error and dirty generations for another retry or export. */ }
-  }
-
-  /** Freeze a consistent snapshot while the native save dialog exports source and available originals. */
-  function exportCurrentRecovery() {
-    if (recovery || frozen) return;
-    recovery = writeCurrentRecovery().finally(() => { recovery = undefined; if (!exit.busy) setFrozen(false); });
-  }
-
-  /** Keep export completion tracked so native close waits for the selected destination to finish writing. */
-  async function writeCurrentRecovery() {
-    setFrozen(true);
-    try {
-      await insertion;
-      stageSession();
-      if (!saver) throw new Error('No workspace has loaded; the existing database remains unchanged');
-      const exported = await storage.exportRecovery(saver.snapshot());
-      notice = !exported.exported ? 'Recovery export cancelled.' : exported.missingOriginals
-        ? `Recovery source exported; ${exported.missingOriginals} image originals were unavailable and are marked in the file.`
-        : 'Recovery exported. Unsaved changes are still open.';
-    } catch (error) { notice = errorMessage(error); }
-  }
-
-  /** Track native backup work in the exit barrier while leaving typing available during snapshot creation. */
-  function runBackup(action: () => Promise<void>) {
-    if (backupPending || frozen || loading || recovery || annotation) return;
-    backupPending = true;
-    backupWork = Promise.resolve().then(action).catch(error => { notice = errorMessage(error); }).finally(() => {
-      backupPending = false; backupWork = undefined;
-    });
-  }
-
-  /** Flush existing generations before opening the export picker; SQLite snapshots stay consistent during further typing. */
-  function exportWorkspaceBackup() {
-    runBackup(async () => {
-      if (!saver) throw new Error('Load the workspace before exporting a backup');
-      await saver.flush();
-      notice = await storage.exportBackup() ? 'Workspace backup exported.' : 'Backup export cancelled.';
-    });
-  }
-
-  /** A privately staged backup remains unchanged while the user reads the replacement warning and continues editing. */
-  function selectWorkspaceBackup() {
-    runBackup(async () => {
-      restorePreview = null;
-      restorePreview = await storage.prepareRestore();
-      if (!restorePreview) notice = 'Backup selection cancelled.';
-    });
-  }
-
-  /** Discard native candidate resources as well as hiding the confirmation. */
-  function cancelWorkspaceRestore() {
-    runBackup(async () => { await storage.cancelRestore(); restorePreview = null; });
-  }
-
-  /** Replace only after all in-flight editor operations and dirty generations settle; failure keeps current caches intact. */
-  function confirmWorkspaceRestore() {
-    if (!restorePreview) return;
-    const token = restorePreview.token;
-    runBackup(async () => {
-      setFrozen(true);
-      try {
-        await insertion; await imageOutput?.catch(() => {}); await transition;
-        if (saver) { stageSession(); await saver.flush(); }
-        try { await storage.restoreBackup(token); }
-        finally { restorePreview = null; }
-        // Every cached revision, undo state, and original belongs to the replaced workspace and must be released.
-        saver?.stop(); saver = undefined;
-        view?.scrollDOM.removeEventListener('scroll', stageSession);
-        view?.destroy(); view = undefined; note = undefined;
-        notes.clear(); states.clear(); automatic.clear(); sources.clear();
-        titles = {}; library = []; closed = []; session = emptySession(); purge = undefined; renaming = false;
-        await loadWorkspace();
-        notice = 'Workspace restored. A pre-restore copy remains in the backup directory.';
-      } finally { if (!exit.busy) setFrozen(false); }
-    });
-  }
 </script>
 
 <svelte:head><title>Simple Note</title></svelte:head>
-
-<main class="flex h-dvh flex-col bg-[var(--bg-app)] text-sm text-[var(--text-primary)]" aria-busy={loading || frozen}>
-  <!-- Primary actions stay visible; infrequent commands use the native light-dismiss popover. -->
+<main class="flex h-dvh flex-col bg-[var(--bg-app)] text-sm text-[var(--text-primary)]" aria-busy={busy || loading || frozen}>
   <header class="app-header">
-    <div class="app-brand">
-      <img class="app-mark" src="/app-icon.png" alt="Simple Note" />
-      <span class="app-title">Simple Note</span>
-      <span class="app-badge">DEV</span>
-    </div>
+    <div class="app-brand"><img class="app-mark" src="/app-icon.png" alt=""/><span class="app-title">Simple Note</span></div>
     <nav class="app-menubar" aria-label="Application menus">
-      {#each ['File', 'Edit', 'View'] as name}
-        <button type="button" aria-haspopup="true" popovertarget={`app-${name.toLowerCase()}-menu`} onclick={event => { event.preventDefault(); openAppMenu(event, `app-${name.toLowerCase()}-menu`); }}>{name}</button>
-      {/each}
+      {#each ['File','Edit','View'] as name}<button type="button" aria-haspopup="true" onclick={event => menu(event,`app-${name}`)}>{name}</button>{/each}
     </nav>
-    <div class="header-center">
-      <button type="button" class="header-search-pill" disabled={loading || frozen || busy} onclick={() => runTab(() => showSidebarPanel('search'))}>
-        <svg class="w-3.5 h-3.5 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg>
-        <span>Search notes or text…</span>
-        <kbd>Ctrl+Shift+F</kbd>
-      </button>
+    <div class="header-center"><button class="header-search-pill" onclick={() => run(() => showPanel('search'))}>Search files… <kbd>Ctrl+Shift+F</kbd></button></div>
+    <button class="header-btn" disabled={!active || busy || loading || frozen} onclick={() => run(() => saveFile().then(() => {}))}>Save <kbd>Ctrl+S</kbd></button>
+    <div id="app-File" popover class="command-menu">
+      <button onclick={() => command(newFile)}>New file <kbd>Ctrl+N</kbd></button>
+      <button onclick={() => command(() => openFile())}>Open file… <kbd>Ctrl+O</kbd></button>
+      <button onclick={() => command(openFolder)}>Open folder… <kbd>Ctrl+Shift+O</kbd></button>
+      <button disabled={!active} onclick={() => command(() => saveFile().then(() => {}))}>Save <kbd>Ctrl+S</kbd></button>
+      <button disabled={!active} onclick={() => command(() => saveFile(workspace.active,true).then(() => {}))}>Save As… <kbd>Ctrl+Shift+S</kbd></button>
+      <div class="menu-separator"></div><button onclick={() => command(reopen)}>Reopen closed tab <kbd>Ctrl+Shift+T</kbd></button>
+      <button onclick={() => { void storage.requestExit(); }}>Quit <kbd>Ctrl+Q</kbd></button>
     </div>
-    <div class="header-actions">
-      <button type="button" class="header-btn header-btn-primary" disabled={loading || frozen || busy || !!startupError} onclick={() => runTab(newNote)}>
-        <span>＋ Note</span>
-      </button>
-      <div class="save-badge" title={saveError ? `Save failed: ${saveError}` : `Status: ${saveStatus}`}>
-        <span class="save-dot" class:saved={saveStatus === 'Saved' && !saveError} class:saving={saveStatus === 'Saving' && !saveError} class:error={saveStatus === 'Error' || !!saveError}></span>
-        <span>{saveStatus === 'Error' || saveError ? 'Error' : saveStatus}</span>
-      </div>
+    <div id="app-Edit" popover class="command-menu">
+      <button onclick={() => command(() => { if (view) undo(view); })}>Undo <kbd>Ctrl+Z</kbd></button>
+      <button onclick={() => command(() => { if (view) redo(view); })}>Redo <kbd>Ctrl+Y</kbd></button>
+      <button onclick={() => command(openFind)}>Find <kbd>Ctrl+F</kbd></button>
+      <button onclick={() => command(() => pasteImage())}>Paste screenshot</button>
     </div>
-    <div id="app-file-menu" popover class="command-menu app-command-menu">
-      <button type="button" disabled={loading || frozen || busy || !!startupError} onclick={() => { closeAppMenus(); runTab(newNote); }}>New note <kbd>Ctrl+N</kbd></button>
-      <button type="button" disabled={loading || frozen || busy || !closed.length} onclick={() => { closeAppMenus(); runTab(reopenNote); }}>Reopen closed tab <kbd>Ctrl+Shift+T</kbd></button>
-      <div class="menu-separator"></div>
-      <button type="button" onclick={() => { closeAppMenus(); openBackups(); }}>Backup and restore…</button>
-      <button type="button" disabled={frozen} onclick={() => { closeAppMenus(); void storage.requestExit().catch(error => { saveError = errorMessage(error); }); }}>Quit</button>
-    </div>
-    <div id="app-edit-menu" popover class="command-menu app-command-menu">
-      <fieldset disabled={loading || frozen || inserting || busy || !session.activeNoteId || !!startupError} aria-label="Editor commands">
-        <button type="button" onclick={() => { closeAppMenus(); if (view) { undo(view); view.focus(); } }}>Undo <kbd>Ctrl+Z</kbd></button>
-        <button type="button" onclick={() => { closeAppMenus(); if (view) { redo(view); view.focus(); } }}>Redo <kbd>Ctrl+Y</kbd></button>
-        <div class="menu-separator"></div>
-        <button type="button" onclick={() => { closeAppMenus(); void openFind(); }}>Find in note <kbd>Ctrl+F</kbd></button>
-        <button type="button" onclick={() => { closeAppMenus(); void pasteScreenshot(); }}>Paste screenshot</button>
-      </fieldset>
-    </div>
-    <div id="app-view-menu" popover class="command-menu app-command-menu">
-      <button type="button" disabled={loading || frozen || busy} onclick={() => { closeAppMenus(); runTab(() => showSidebarPanel('explorer')); }}>Explorer <kbd>Ctrl+Shift+E</kbd></button>
-      <button type="button" disabled={loading || frozen || busy} onclick={() => { closeAppMenus(); runTab(() => showSidebarPanel('search')); }}>Search <kbd>Ctrl+Shift+F</kbd></button>
-      <button type="button" disabled={loading || frozen || busy} onclick={() => { closeAppMenus(); runTab(toggleSidebar); }}>{session.sidebarVisible ? 'Hide' : 'Show'} sidebar <kbd>Ctrl+B</kbd></button>
-      <button type="button" disabled={loading || frozen || busy || !session.activeNoteId} onclick={() => { closeAppMenus(); toggleWrap(); }}>{wrap ? 'Disable' : 'Enable'} word wrap <kbd>Alt+Z</kbd></button>
+    <div id="app-View" popover class="command-menu">
+      <button onclick={() => command(() => showPanel('explorer'))}>Explorer <kbd>Ctrl+Shift+E</kbd></button>
+      <button onclick={() => command(() => showPanel('search'))}>Search <kbd>Ctrl+Shift+F</kbd></button>
+      <button onclick={() => command(() => { workspace = { ...workspace, sidebar: !workspace.sidebar }; scheduleRecovery(); })}>Toggle sidebar <kbd>Ctrl+B</kbd></button>
+      <button onclick={() => command(wrap)}>Toggle word wrap <kbd>Alt+Z</kbd></button>
     </div>
   </header>
-  <dialog bind:this={backupDialog} class="settings-dialog" aria-labelledby="backup-heading" oncancel={event => { if (backupPending || restorePreview) event.preventDefault(); }}>
-    <div class="dialog-heading"><h2 id="backup-heading">Backup and restore</h2><button type="button" aria-label="Close backup settings" disabled={backupPending || !!restorePreview} onclick={() => backupDialog.close()}>×</button></div>
-    <div class="backup-card">
-      <p class="font-medium text-white mb-1">Local SQLite snapshots are fully self-contained.</p>
-      <p class="text-neutral-400">Backups preserve all notes, source code, attachments, inline images, and tab sessions.</p>
-      <div class="mt-3 pt-3 border-t border-[#232533] space-y-1 text-xs">
-        <p class="break-all text-neutral-300"><strong>Storage directory:</strong> {backupStatus.directory || 'Loading backup location…'}</p>
-        {#if backupStatus.lastBackup}<p class="break-all text-neutral-300"><strong>Latest snapshot:</strong> {backupStatus.lastBackup}</p>{/if}
-      </div>
-    </div>
-    <div class="flex gap-2 mb-3">
-      <button type="button" class="header-btn px-3 py-1.5 border border-[#2d3142] bg-[#1a1c26] text-white" disabled={loading || frozen || backupPending || !!startupError} onclick={exportWorkspaceBackup}>Export workspace backup</button>
-      <button type="button" class="header-btn px-3 py-1.5 border border-[#2d3142] bg-[#1a1c26] text-white" disabled={loading || frozen || backupPending} onclick={selectWorkspaceBackup}>Select backup to restore…</button>
-    </div>
-    {#if backupPending}<p role="status" class="text-xs text-amber-400 font-medium">Working on backup or restore…</p>{/if}
-    {#if restorePreview}
-      <div role="alert" class="my-3 border border-amber-500/50 bg-amber-950/20 rounded-lg p-3 text-xs">
-        <p class="font-semibold text-amber-300 mb-1">Confirm Restore & Replace</p>
-        <p class="text-neutral-300 mb-2">Replace all local notes, Trash, images, and tabs with this backup ({restorePreview.notes} notes, {restorePreview.trashed} in Trash)? This does not merge workspaces.</p>
-        <p class="text-neutral-400 mb-2">Current edits will be saved first. A pre-restore backup is kept. If the current store is unreadable, its original database files are preserved instead.</p>
-        <div class="flex gap-2">
-          <button type="button" class="bg-amber-600 hover:bg-amber-500 text-white font-medium px-3 py-1 rounded" disabled={loading || frozen || backupPending} onclick={confirmWorkspaceRestore}>Confirm replacement and restore</button>
-          <button type="button" class="bg-[#242633] px-3 py-1 rounded text-neutral-300" disabled={frozen || backupPending} onclick={cancelWorkspaceRestore}>Cancel restore</button>
-        </div>
-      </div>
-    {/if}
-
-    {#if notice}<p role="status" class="text-xs text-sky-400 mt-2">{notice}</p>{/if}
-    <div class="dialog-actions"><button type="button" class="header-btn header-btn-primary px-4 py-1.5" disabled={backupPending || !!restorePreview} onclick={() => backupDialog.close()}>Done</button></div>
-  </dialog>
-  {#if backupStatus.error}<div role="alert" class="bg-[#522] px-4 py-2 border-b border-red-500/30">Automatic backup failed: {backupStatus.error}. Acknowledged saves remain intact. The next successful write retries the backup.</div>{/if}
-  {#if startupError}
-    <div class="flex flex-wrap gap-3 bg-[#522] px-4 py-2 border-b border-red-500/30" role="alert">
-      <span>Could not load notes: {startupError}</span>
-      <button type="button" disabled={loading || frozen} onclick={retryStartup}>Retry loading</button>
-      <button type="button" disabled={loading || frozen || backupPending} onclick={() => { openBackups(); selectWorkspaceBackup(); }}>Recover from a backup…</button>
-      <button type="button" disabled={loading || frozen} onclick={() => { confirmDiscard = true; }}>Quit without changes</button>
-    </div>
-  {/if}
-  {#if saveError}
-    <div class="flex flex-wrap gap-3 bg-[#522] px-4 py-2 border-b border-red-500/30" role="alert">
-      <span>Could not save: {saveError}. Your current work remains open.</span>
-      <button type="button" disabled={frozen} onclick={retrySave}>Retry saving</button>
-      <button type="button" disabled={frozen} onclick={exportCurrentRecovery}>Export recovery</button>
-      <button type="button" disabled={frozen} onclick={() => { confirmDiscard = true; }}>Quit without saving</button>
-    </div>
-  {/if}
-  {#if confirmDiscard}
-    <div class="flex flex-wrap gap-3 bg-[#522] px-4 py-2 border-b border-red-500/30" role="alert">
-      <span>Discard all unsaved changes and quit? Only acknowledged saves will remain.</span>
-      <button type="button" disabled={frozen} onclick={() => { confirmDiscard = false; void exit.request(true); }}>Confirm discard and quit</button>
-      <button type="button" disabled={frozen} onclick={() => { confirmDiscard = false; }}>Keep editing</button>
-    </div>
-  {/if}
-  <!-- Explorer spans the workspace height; tabs and search belong only to the editor column. -->
+  {#if startupError}<div role="alert" class="p-3 bg-red-950">Could not load workspace: {startupError}. Recovery was preserved. Restart after resolving the error.</div>{/if}
+  {#if recoveryError}<div role="alert" class="p-3 bg-red-950">Recovery failed: {recoveryError}. Your work remains open. <button onclick={() => run(() => checkpoint())}>Retry recovery</button></div>{/if}
+  {#if active?.external}<div role="alert" class="p-3 bg-amber-950">{active.external === 'deleted' ? 'File deleted or renamed externally. This buffer is retained; use Save As to save elsewhere.' : active.external === 'changed' ? 'File changed externally. Your unsaved edits are retained.' : 'File is unreadable. Your buffer is retained.'} <button onclick={() => run(() => saveFile(workspace.active,true).then(() => {}))}>Save As…</button>{#if active.external !== 'deleted'}<button onclick={() => run(reloadDisk)}>Reload from disk</button>{/if}</div>{/if}
   <div class="workspace">
     <nav class="activity-bar" aria-label="Workspace views">
-      <button type="button" aria-label="Explorer" title="Explorer (Ctrl+Shift+E)" aria-pressed={session.sidebarVisible && sidebarPanel === 'explorer'} disabled={loading || frozen || busy} onclick={() => runTab(() => showSidebarPanel('explorer', true))}>
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h8l4 4v14H8zM16 3v5h4M5 6H3v15h2" /></svg>
-      </button>
-      <button type="button" aria-label="Search" title="Search (Ctrl+Shift+F)" aria-pressed={session.sidebarVisible && sidebarPanel === 'search'} disabled={loading || frozen || busy} onclick={() => runTab(() => showSidebarPanel('search', true))}>
-        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg>
-      </button>
-      <div class="activity-bar-bottom">
-        <button type="button" aria-label="Toggle word wrap" title={`Word wrap: ${wrap ? 'On' : 'Off'} (Alt+Z)`} aria-pressed={wrap} disabled={loading || frozen || busy || !session.activeNoteId} onclick={toggleWrap}>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h10a3 3 0 1 1 0 6h-4M4 18h2M12 16l-2 2 2 2"/></svg>
-        </button>
-        <button type="button" aria-label="Backup and restore" title="Backup and restore…" disabled={loading || frozen || backupPending} onclick={openBackups}>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3v12c0 1.7-3.6 3-8 3s-8-1.3-8-3V6zM4 12c0 1.7 3.6 3 8 3s8-1.3 8-3M4 18c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
-        </button>
-      </div>
+      <button title="Explorer (Ctrl+Shift+E)" aria-label="Explorer" aria-pressed={workspace.sidebar && panel === 'explorer'} onclick={() => run(() => showPanel('explorer'))}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h8l4 4v14H8zM16 3v5h4M5 6H3v15h2"/></svg></button>
+      <button title="Search (Ctrl+Shift+F)" aria-label="Search" aria-pressed={workspace.sidebar && panel === 'search'} onclick={() => run(() => showPanel('search'))}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg></button>
     </nav>
-    {#if session.sidebarVisible}<aside class="note-sidebar" aria-label={sidebarPanel === 'search' ? 'Search notes' : 'Notes'}>
-      <fieldset disabled={loading || frozen || busy || !!annotation}>
-        <div class="sidebar-header">
-          <span class="sidebar-title">{sidebarPanel === 'search' ? 'SEARCH' : 'EXPLORER'}</span>
-          <div class="sidebar-actions">
-            {#if sidebarPanel === 'explorer'}
-              <button type="button" class="sidebar-btn" title="New Note (Ctrl+N)" onclick={() => runTab(newNote)}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 5v14M5 12h14"/></svg>
-              </button>
-              <button type="button" class="sidebar-btn" title="Refresh notes" onclick={() => runTab(browseLibrary)}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16M16 16h5v5"/></svg>
-              </button>
-            {/if}
-          </div>
-        </div>
-        <div id="explorer-panel" tabindex="-1">
-        {#if sidebarPanel === 'explorer'}
-        <div class="library-switch">
-          <button type="button" aria-pressed={!trash} onclick={() => runTab(async () => { trash = false; await browseLibrary(); })}>All Notes</button>
-          <button type="button" aria-pressed={trash} onclick={() => runTab(async () => { trash = true; await browseLibrary(); })}>Trash</button>
-        </div>
-        {:else}
-        <form class="library-search" onsubmit={event => { event.preventDefault(); runTab(() => browseLibrary()); }}>
-          <label class="sr-only" for="library-search">Search titles and text</label>
-          <input id="library-search" placeholder="Search notes…" bind:value={libraryQuery} />
-          <button type="submit" aria-label="Search or refresh notes" title="Search or refresh">↵</button>
-        </form>
-        {/if}
-        </div>
-        {#each library as item (item.id)}
-          {@const badge = getLangBadge(notes.get(item.id)?.language)}
-          <button type="button" class="library-row" class:current={!trash && session.activeNoteId === item.id}
-            title={titles[item.id] ?? item.title} aria-haspopup="true"
-            oncontextmenu={event => openLibraryMenu(event, item)}
-            onkeydown={event => { if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) openLibraryMenu(event, item); }}
-            onclick={event => { if (trash) openLibraryMenu(event, item); else runTab(() => mountNote(item.id)); }}>
-            <span class={`file-badge ${badge.cls}`}>{badge.label}</span>
-            <span class="file-name">{titles[item.id] ?? item.title}</span>
-          </button>
-        {/each}
-        {#if !library.length}<p class="empty-library">{trash ? 'Trash is empty.' : 'No notes found. Try another search or create a note.'}</p>{/if}
-        {#if libraryMore}<button type="button" class="w-full mt-2 py-1 bg-[#1a1c25] rounded text-xs text-neutral-300 hover:text-white" onclick={() => runTab(() => browseLibrary(true))}>Load more</button>{/if}
-        {#if purge}<div role="alert" class="p-3 my-2 border border-red-500/40 rounded-lg bg-red-950/30 text-xs"><p class="mb-2">Permanently delete “{purge.title}”? This cannot be undone.</p><div class="flex gap-2"><button type="button" class="bg-red-600 text-white px-2 py-1 rounded" onclick={() => runTab(() => lifecycle(purge!, 'purge'))}>Confirm</button><button type="button" class="bg-[#242633] px-2 py-1 rounded text-neutral-300" onclick={() => { purge = undefined; }}>Cancel</button></div></div>{/if}
-      </fieldset>
+    {#if workspace.sidebar}<aside class="note-sidebar" aria-label={panel}>
+      <div class="sidebar-header"><span class="sidebar-title">{panel.toUpperCase()}</span><button onclick={() => run(openFolder)}>Open folder…</button><button aria-label="Refresh folder" onclick={() => run(refresh)}>↻</button></div>
+      <p class="px-3 text-xs break-all">{workspace.root ?? 'Open a folder to browse and search real files.'}</p>
+      {#if panel === 'search'}<form class="library-search" onsubmit={event => { event.preventDefault(); run(refresh); }}><input aria-label="Search workspace text" bind:value={query} placeholder="Search files…"/><button>Search</button></form>{/if}
+      {#each entries as entry (`${entry.path}:${entry.line ?? ''}`)}
+        <button class="library-row" title={entry.path} disabled={entry.directory} style:padding-left={`${12 + (entry.relative.split('/').length-1)*12}px`} onclick={() => run(() => openFile(entry.path,entry.line))}><span>{entry.directory ? '▾' : '·'}</span><span class="file-name">{panel === 'search' ? `${entry.relative}:${entry.line} ${entry.preview}` : entry.relative.split('/').at(-1)}</span></button>
+      {/each}
+      {#if !entries.length}<p class="empty-library">No files or matches.</p>{/if}
     </aside>{/if}
     <div class="editor-column">
-      <!-- One editor remains mounted; tab menus only change existing serialized operations. -->
-      <div class="tab-strip" role="tablist" aria-label="Open notes">
-        {#each session.tabs as tab, index (tab.noteId)}
-          {@const badge = getLangBadge(notes.get(tab.noteId)?.language)}
-          <div class="note-tab" class:active={session.activeNoteId === tab.noteId}>
-            <button id={`tab-${tab.noteId}`} type="button" role="tab" aria-selected={session.activeNoteId === tab.noteId} aria-controls="note-panel"
-              tabindex={session.activeNoteId === tab.noteId ? 0 : -1} disabled={frozen || busy || loading}
-              class="tab-label" oncontextmenu={event => openTabMenu(event, tab.noteId)}
-              onkeydown={event => tabKey(event, index)} onclick={() => runTab(() => mountNote(tab.noteId))}>
-              <span class="tab-symbol" aria-label={tab.pinned ? 'Pinned' : undefined}>
-                {#if tab.pinned}
-                  <svg class="w-3.5 h-3.5 text-indigo-400 inline-block align-middle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 17v5M9 3h6l1 7h-8z"/></svg>
-                {:else}
-                  <span class={`file-badge ${badge.cls}`}>{badge.label}</span>
-                {/if}
-              </span>
-              <span>{titles[tab.noteId] ?? 'Untitled'}</span>
-            </button>
-            <button type="button" class="tab-action" aria-label={`Actions for ${titles[tab.noteId] ?? 'Untitled'}`} disabled={frozen || busy || loading} onclick={event => openTabMenu(event, tab.noteId)}>···</button>
-            <button type="button" class="tab-action" aria-label={`Close ${titles[tab.noteId] ?? 'Untitled'}`} disabled={frozen || busy || loading} onclick={() => runTab(() => closeNote(tab.noteId))}>×</button>
-          </div>
-        {/each}
-        <button type="button" class="tab-new-btn" title="New Note (Ctrl+N)" disabled={loading || frozen || busy || !!startupError} onclick={() => runTab(newNote)}>＋</button>
+      <div class="tab-strip" role="tablist" aria-label="Open files">
+        {#each workspace.buffers as buffer, index (buffer.id)}<div class="note-tab" class:active={workspace.active === buffer.id}>
+          <button class="tab-label" role="tab" aria-selected={workspace.active === buffer.id} aria-controls="file-panel" tabindex={workspace.active === buffer.id ? 0 : -1} title={buffer.path ?? 'Unsaved file'} disabled={busy || frozen} oncontextmenu={event => tabContext(event,buffer.id)} onkeydown={event => { const target = event.key === 'ArrowRight' ? (index+1)%workspace.buffers.length : event.key === 'ArrowLeft' ? (index+workspace.buffers.length-1)%workspace.buffers.length : event.key === 'Home' ? 0 : event.key === 'End' ? workspace.buffers.length-1 : -1; if (target >= 0) { event.preventDefault(); run(() => mount(workspace.buffers[target].id)); } }} onclick={() => run(() => mount(buffer.id))}>{buffer.pinned ? '◆ ' : ''}{files.title(buffer)}{files.modified(buffer) ? ' ●' : ''}{buffer.external ? ' !' : ''}</button>
+          <button class="tab-action" aria-label={`Actions for ${files.title(buffer)}`} onclick={event => tabContext(event,buffer.id)}>···</button>
+          <button class="tab-action" aria-label={`Close ${files.title(buffer)}`} onclick={() => run(() => closeFile(buffer.id))}>×</button>
+        </div>{/each}
+        <button class="tab-new-btn" title="New file (Ctrl+N)" onclick={() => run(newFile)}>＋</button>
       </div>
-      <div bind:this={tabMenu} popover class="command-menu" style:left={`${menuX}px`} style:top={`${menuY}px`} aria-label="Tab actions">
-        <button type="button" disabled={frozen || busy || loading} onclick={() => tabAction('rename')}>Rename…</button>
-        <button type="button" disabled={frozen || busy || loading} onclick={() => tabAction('pin')}>{session.tabs.find(tab => tab.noteId === menuNote)?.pinned ? 'Unpin tab' : 'Pin tab'}</button>
-        <button type="button" disabled={frozen || busy || loading} onclick={() => tabAction('left')}>Move tab left</button>
-        <button type="button" disabled={frozen || busy || loading} onclick={() => tabAction('right')}>Move tab right</button>
-        <button type="button" disabled={frozen || busy || loading} onclick={() => tabAction('close')}>Close tab</button>
+      <div bind:this={tabMenu} popover class="command-menu" aria-label="Tab actions">
+        <button onclick={() => command(() => alterTab('pin'))}>Pin / Unpin</button><button onclick={() => command(() => alterTab(-1))}>Move left</button><button onclick={() => command(() => alterTab(1))}>Move right</button><button onclick={() => command(() => closeFile(menuBuffer!))}>Close</button>
       </div>
-      {#if renaming && session.activeNoteId}
-        <form class="rename-bar" onsubmit={renameNote}><label for="note-title">Note title</label><input id="note-title" bind:value={renameValue} disabled={frozen || busy} /><button type="submit" disabled={frozen || busy}>Apply</button><button type="button" onclick={() => { renaming = false; view?.focus(); }}>Cancel</button></form>
-      {/if}
-      {#if findVisible}
-        <form class="find-bar" onsubmit={find}>
-          <label for="find" class="sr-only">Find in note</label>
-          <svg class="w-3.5 h-3.5 text-neutral-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg>
-          <input id="find" onkeydown={event => { if (event.key === 'Escape') { event.preventDefault(); findVisible = false; view?.focus(); } }} placeholder="Find in note…" bind:value={query} disabled={loading || frozen || inserting || busy || !session.activeNoteId || !!startupError} />
-          <button type="submit" disabled={loading || frozen || inserting || busy || !session.activeNoteId || !!startupError}>Find next</button>
-          <button type="button" aria-label="Close find" onclick={() => { findVisible = false; view?.focus(); }}>×</button>
-        </form>
-      {/if}
-
-        <div id="note-panel" role="tabpanel" tabindex="0" aria-label="Active note" class="relative min-h-0 min-w-0 flex-1">
-          <div class="h-full" class:hidden={!session.activeNoteId} bind:this={host}></div>
-          {#if !loading && !startupError && !session.activeNoteId}
-            <div class="empty-workspace">
-              <img class="empty-logo" src="/app-icon.png" alt="Simple Note" />
-              <h1 class="empty-title">Simple Note</h1>
-              <p class="empty-desc">Fast, local-first scratchpad for developers. Everything saves automatically.</p>
-              <div class="empty-actions">
-                <button type="button" class="header-btn header-btn-primary px-4 py-2 text-xs" disabled={frozen || busy} onclick={() => runTab(newNote)}>
-                  ＋ Create a new note
-                </button>
-                <button type="button" class="header-btn px-4 py-2 text-xs border border-[#2b2d39] bg-[#161720]" disabled={frozen || busy} onclick={() => showSidebarPanel('explorer')}>
-                  Open Explorer
-                </button>
-              </div>
-              <div class="empty-shortcuts">
-                <div class="empty-shortcut-row"><span>New note</span><kbd>Ctrl+N</kbd></div>
-                <div class="empty-shortcut-row"><span>Find in note</span><kbd>Ctrl+F</kbd></div>
-                <div class="empty-shortcut-row"><span>Search all</span><kbd>Ctrl+Shift+F</kbd></div>
-                <div class="empty-shortcut-row"><span>Toggle Explorer</span><kbd>Ctrl+Shift+E</kbd></div>
-                <div class="empty-shortcut-row"><span>Paste screenshot</span><kbd>Ctrl+V</kbd></div>
-                <div class="empty-shortcut-row"><span>Toggle wrap</span><kbd>Alt+Z</kbd></div>
-              </div>
-            </div>
-          {/if}
-        </div>
+      {#if findVisible}<form class="find-bar" onsubmit={find}><input id="find" aria-label="Find in file" bind:value={findQuery} placeholder="Find…" onkeydown={event => { if (event.key === 'Escape') { findVisible = false; view?.focus(); } }}/><button>Find next</button><button type="button" aria-label="Close find" onclick={() => { findVisible = false; view?.focus(); }}>×</button></form>{/if}
+      <div id="file-panel" role="tabpanel" tabindex="0" aria-label="Active file" class="relative min-h-0 min-w-0 flex-1">
+        <div class="h-full" class:hidden={!active} bind:this={host}></div>
+        {#if !active && !loading}<div class="empty-workspace"><h1 class="empty-title">Simple Note</h1><p class="empty-desc">Local files. Inline images. Unsaved work recovered on reopening.</p><div class="empty-actions"><button onclick={() => run(newFile)}>New file</button><button onclick={() => run(() => openFile())}>Open file…</button><button onclick={() => run(openFolder)}>Open folder…</button></div></div>{/if}
+      </div>
     </div>
   </div>
-  <div bind:this={libraryMenu} popover class="command-menu" style:left={`${menuX}px`} style:top={`${menuY}px`} aria-label="Note actions">
-    {#if libraryTarget?.deletedAt != null}
-      <button type="button" disabled={frozen || busy || loading || inserting} onclick={() => libraryAction('restore')}>Restore note</button>
-      <button type="button" disabled={frozen || busy || loading || inserting} onclick={() => libraryAction('purge')}>Delete permanently…</button>
-    {:else}
-      <button type="button" disabled={frozen || busy || loading || inserting} onclick={() => libraryAction('rename')}>Rename…</button>
-      <button type="button" disabled={frozen || busy || loading || inserting} onclick={() => libraryAction('trash')}>Move to Trash</button>
-    {/if}
-  </div>
-  <footer class="status-bar">
-    <div class="status-item">
-      <span class="save-dot" class:saved={saveStatus === 'Saved' && !saveError} class:saving={saveStatus === 'Saving' && !saveError} class:error={saveStatus === 'Error' || !!saveError}></span>
-      <span role="status" aria-live="polite">{loading ? 'Loading notes…' : frozen ? 'Finishing current work…' : startupError ? 'Notes unavailable' : saveStatus === 'Error' ? 'Save failed — retry or export recovery' : saveStatus}</span>
-    </div>
-    {#if notice}<span class="status-notice" role="status">{notice}</span>{/if}
-    <fieldset class="status-tools" disabled={loading || frozen || inserting || busy || !session.activeNoteId || !!startupError} aria-label="Editor preferences">
-      <button type="button" aria-pressed={wrap} onclick={toggleWrap}>Wrap: {wrap ? 'On' : 'Off'}</button>
-      <label><span class="sr-only">Language</span><select aria-label="Note language" bind:value={language} onchange={changeLanguage}>{#each Object.entries(languageNames) as [value, name]}<option {value}>{name}</option>{/each}</select></label>
-      <span class="text-[#4b5563]">|</span>
-      <span class="text-[10px] font-mono text-neutral-400 px-1">UTF-8</span>
-    </fieldset>
-  </footer>
+  <footer class="status-bar"><span role="status">{loading ? 'Loading…' : busy || frozen ? 'Working…' : active && files.modified(active) ? 'Modified' : 'Saved'}{recoveryError ? ' · Recovery failed' : ''}</span>{#if notice}<span role="status" class="status-notice">{notice}</span>{/if}<div class="status-tools"><button onclick={() => run(wrap)}>Wrap: {workspace.wrap ? 'On' : 'Off'}</button><span>{files.languageFor(active?.path ?? null)} · UTF-8</span></div></footer>
 </main>
-{#if annotation}
-  <AnnotationEditor block={annotation.block} blob={annotation.blob} status={saveError ? `Could not save: ${saveError}. Your work remains open.` : saveStatus}
-    onoutput={outputAnnotation}
-    onchange={annotations => { if (view && annotation) view.dispatch(annotateImage(view.state, annotation.block.id, annotations)); }}
-    onclose={closeAnnotation} />
-{/if}
+<dialog bind:this={closeDialog} class="settings-dialog" aria-labelledby="close-heading" oncancel={() => { closeTarget = null; }}>
+  <h2 id="close-heading">Save changes before closing?</h2><p>Unsaved changes will be lost if you choose Don’t Save.</p>
+  <div class="dialog-actions"><button disabled={busy} onclick={() => run(() => closeFile(closeTarget!,'save'))}>Save</button><button disabled={busy} onclick={() => run(() => closeFile(closeTarget!,'discard'))}>Don’t Save</button><button disabled={busy} onclick={() => { closeDialog.close(); closeTarget = null; }}>Cancel</button></div>
+</dialog>
+{#if annotation}<AnnotationEditor block={annotation.block} blob={annotation.blob} status={recoveryError || 'Changes retained in recovery until Save'} onchange={annotate} onoutput={outputAnnotation} onclose={() => { annotation = undefined; view?.focus(); }}/>{/if}

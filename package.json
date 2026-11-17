@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "bun test",
+    "test:layout": "playwright test",
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",
@@ -16,10 +17,12 @@
   "license": "MIT",
   "dependencies": {
     "@codemirror/commands": "^6.11.1",
+    "@codemirror/lang-css": "^6.3.1",
     "@codemirror/lang-html": "^6.4.12",
     "@codemirror/lang-javascript": "^6.2.5",
     "@codemirror/lang-json": "^6.0.2",
     "@codemirror/lang-markdown": "^6.5.2",
+    "@codemirror/lang-php": "^6.0.2",
     "@codemirror/language": "^6.13.1",
     "@codemirror/search": "^6.7.2",
     "@codemirror/state": "^6.7.6",
@@ -27,6 +30,7 @@
     "@tauri-apps/api": "^2"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.1",
     "@sveltejs/adapter-static": "^3.0.10",
     "@sveltejs/kit": "^2.65.1",
     "@sveltejs/vite-plugin-svelte": "^7.1.2",
