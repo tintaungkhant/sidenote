@@ -64,17 +64,3 @@ export function textSearch(query: string): SearchQuery {
     test: (_match, state, from, to) => !state.field(imageField).some(image => image.from >= from && image.from < to)
   });
 }
-
-/** Move a range to an outside boundary while retaining image IDs, annotations, and one undo step. */
-export function moveRange(state: EditorState, from: number, to: number, target: number): TransactionSpec {
-  if (from < 0 || to > state.doc.length || from > to || target < 0 || target > state.doc.length) throw new RangeError('Invalid move range');
-  if (target >= from && target <= to || from === to) return {};
-  const insert = state.sliceDoc(from, to);
-  const changes = state.changes([{ from, to }, { from: target, insert }].sort((a, b) => a.from - b.from));
-  const start = target < from ? target : target - (to - from);
-  const images = state.field(imageField).map(image => ({
-    ...image,
-    from: image.from >= from && image.from < to ? start + image.from - from : changes.mapPos(image.from, 1)
-  })).sort((a, b) => a.from - b.from);
-  return { changes, effects: restoreImages.of(images), selection: { anchor: start, head: start + insert.length }, userEvent: 'move' };
-}

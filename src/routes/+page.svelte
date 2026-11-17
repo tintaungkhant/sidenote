@@ -11,7 +11,7 @@
   import { html } from '@codemirror/lang-html';
   import { markdown } from '@codemirror/lang-markdown';
   import { listen } from '@tauri-apps/api/event';
-  import { createNoteState, imageField, insertImage, moveRange, textSearch, annotateImage } from '$lib/editor/state';
+  import { createNoteState, imageField, insertImage, textSearch, annotateImage } from '$lib/editor/state';
   import AnnotationEditor from '$lib/editor/AnnotationEditor.svelte';
   import { decodeDocument, type Annotation, type AttachmentId, type ImageBlock, type ImageId } from '$lib/editor/document';
   import { flattenImage } from '$lib/editor/image-output';
@@ -144,6 +144,7 @@
     });
   }
 
+  let sidebarPanel = $state<'explorer' | 'search'>('explorer');
   let libraryQuery = $state('');
   let library = $state.raw<storage.NoteSummary[]>([]);
   let trash = $state(false);
@@ -154,7 +155,7 @@
   const editabilitySlot = new Compartment();
   const sources = new Map<AttachmentId, Blob>();
   const languageNames: Record<storage.NoteLanguage, string> = { plaintext: 'Plain text', markdown: 'Markdown', javascript: 'JavaScript', typescript: 'TypeScript', json: 'JSON', html: 'HTML' };
-  // Text-only reordering commands cannot preserve sidecar identity. Use explicit range movement instead.
+  // Disable text-only reordering when images are present to preserve their sidecar identity.
   const textOnlyCommands = new Set<Command>([moveLineUp, moveLineDown, copyLineUp, copyLineDown, transposeChars]);
   const editingKeys = defaultKeymap.map(binding => ({ ...binding,
     run: binding.run && textOnlyCommands.has(binding.run) ? (editor: EditorView) =>
@@ -369,6 +370,16 @@
     stageNote();
   }
 
+  async function showSidebarPanel(panel: 'explorer' | 'search', toggle = false) {
+    if (toggle && session.sidebarVisible && sidebarPanel === panel) { await toggleSidebar(); return; }
+    if (sidebarPanel !== panel) { libraryQuery = ''; trash = false; }
+    sidebarPanel = panel;
+    session = { ...session, sidebarVisible: true }; stageSession();
+    await browseLibrary();
+    await tick();
+    document.getElementById(panel === 'search' ? 'library-search' : 'explorer-panel')?.focus();
+  }
+
   /** Persist optional sidebar visibility even when every tab is closed. */
   async function toggleSidebar() {
     session = { ...session, sidebarVisible: !session.sidebarVisible }; stageSession();
@@ -470,6 +481,8 @@
       else if (action === 'close' && session.activeNoteId) await closeNote(session.activeNoteId);
       else if (action === 'reopen') await reopenNote();
       else if (action === 'sidebar') await toggleSidebar();
+      else if (action === 'explorer' || action === 'search') await showSidebarPanel(action);
+      else if (action === 'wrap') toggleWrap();
       else if (session.tabs.length) {
         const index = session.tabs.findIndex(tab => tab.noteId === session.activeNoteId);
         await mountNote(session.tabs[(index + (action === 'previous' ? session.tabs.length - 1 : 1)) % session.tabs.length].noteId);
@@ -494,17 +507,6 @@
     wrap = !wrap;
     view?.dispatch({ effects: wrapSlot.reconfigure(wrap ? EditorView.lineWrapping : []) });
     stageSession();
-  }
-
-  /** Move selected content one adjacent Unicode character, including any selected images. */
-  function moveSelection(direction: -1 | 1) {
-    if (!view || frozen) return;
-    const { from, to, empty } = view.state.selection.main;
-    if (empty) return;
-    const adjacent = direction < 0 ? Array.from(view.state.sliceDoc(0, from)).at(-1) : Array.from(view.state.sliceDoc(to))[0];
-    if (!adjacent) return;
-    view.dispatch(moveRange(view.state, from, to, direction < 0 ? from - adjacent.length : to + adjacent.length));
-    view.focus();
   }
 
   /** Find literal text, rejecting matches that include actual image positions. */
@@ -667,7 +669,7 @@
   <header class="app-header">
     <svg class="app-mark" viewBox="0 0 24 24" role="img" aria-label="Simple Note"><path d="M6 3h9l4 4v14H6zM14 3v5h5M9 12h7M9 16h5" /></svg>
     <nav class="app-menubar" aria-label="Application menus">
-      {#each ['File', 'Edit', 'Selection', 'View'] as name}
+      {#each ['File', 'Edit', 'View'] as name}
         <button type="button" aria-haspopup="true" popovertarget={`app-${name.toLowerCase()}-menu`} onclick={event => { event.preventDefault(); openAppMenu(event, `app-${name.toLowerCase()}-menu`); }}>{name}</button>
       {/each}
     </nav>
@@ -685,21 +687,17 @@
     <div id="app-edit-menu" popover class="command-menu app-command-menu">
       <fieldset disabled={loading || frozen || inserting || busy || !session.activeNoteId || !!startupError} aria-label="Editor commands">
         <button type="button" onclick={() => { closeAppMenus(); if (view) { undo(view); view.focus(); } }}>Undo <kbd>Ctrl+Z</kbd></button>
-        <button type="button" onclick={() => { closeAppMenus(); if (view) { redo(view); view.focus(); } }}>Redo <kbd>Ctrl+Shift+Z</kbd></button>
+        <button type="button" onclick={() => { closeAppMenus(); if (view) { redo(view); view.focus(); } }}>Redo <kbd>Ctrl+Y</kbd></button>
         <div class="menu-separator"></div>
         <button type="button" onclick={() => { closeAppMenus(); void openFind(); }}>Find in note <kbd>Ctrl+F</kbd></button>
         <button type="button" onclick={() => { closeAppMenus(); void pasteScreenshot(); }}>Paste screenshot</button>
       </fieldset>
     </div>
-    <div id="app-selection-menu" popover class="command-menu app-command-menu">
-      <fieldset disabled={loading || frozen || inserting || busy || !session.activeNoteId || !!startupError} aria-label="Selection commands">
-        <button type="button" onclick={() => { closeAppMenus(); moveSelection(-1); }}>Move selection left</button>
-        <button type="button" onclick={() => { closeAppMenus(); moveSelection(1); }}>Move selection right</button>
-      </fieldset>
-    </div>
     <div id="app-view-menu" popover class="command-menu app-command-menu">
-      <button type="button" disabled={loading || frozen || busy} onclick={() => { closeAppMenus(); runTab(toggleSidebar); }}>{session.sidebarVisible ? 'Hide' : 'Show'} Explorer <kbd>Ctrl+B</kbd></button>
-      <button type="button" disabled={loading || frozen || busy || !session.activeNoteId} onclick={() => { closeAppMenus(); toggleWrap(); }}>{wrap ? 'Disable' : 'Enable'} word wrap</button>
+      <button type="button" disabled={loading || frozen || busy} onclick={() => { closeAppMenus(); runTab(() => showSidebarPanel('explorer')); }}>Explorer <kbd>Ctrl+Shift+E</kbd></button>
+      <button type="button" disabled={loading || frozen || busy} onclick={() => { closeAppMenus(); runTab(() => showSidebarPanel('search')); }}>Search <kbd>Ctrl+Shift+F</kbd></button>
+      <button type="button" disabled={loading || frozen || busy} onclick={() => { closeAppMenus(); runTab(toggleSidebar); }}>{session.sidebarVisible ? 'Hide' : 'Show'} sidebar <kbd>Ctrl+B</kbd></button>
+      <button type="button" disabled={loading || frozen || busy || !session.activeNoteId} onclick={() => { closeAppMenus(); toggleWrap(); }}>{wrap ? 'Disable' : 'Enable'} word wrap <kbd>Alt+Z</kbd></button>
     </div>
   </header>
   <dialog bind:this={backupDialog} class="settings-dialog" aria-labelledby="backup-heading" oncancel={event => { if (backupPending || restorePreview) event.preventDefault(); }}>
@@ -748,16 +746,29 @@
   {/if}
   <!-- Explorer spans the workspace height; tabs and search belong only to the editor column. -->
   <div class="workspace">
-    {#if session.sidebarVisible}<aside class="note-sidebar" aria-label="Notes">
+    <nav class="activity-bar" aria-label="Workspace views">
+      <button type="button" aria-label="Explorer" title="Explorer (Ctrl+Shift+E)" aria-pressed={session.sidebarVisible && sidebarPanel === 'explorer'} disabled={loading || frozen || busy} onclick={() => runTab(() => showSidebarPanel('explorer', true))}>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h8l4 4v14H8zM16 3v5h4M5 6H3v15h2" /></svg>
+      </button>
+      <button type="button" aria-label="Search" title="Search (Ctrl+Shift+F)" aria-pressed={session.sidebarVisible && sidebarPanel === 'search'} disabled={loading || frozen || busy} onclick={() => runTab(() => showSidebarPanel('search', true))}>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg>
+      </button>
+    </nav>
+    {#if session.sidebarVisible}<aside class="note-sidebar" aria-label={sidebarPanel === 'search' ? 'Search notes' : 'Notes'}>
       <fieldset disabled={loading || frozen || busy || !!annotation}>
-        <legend>EXPLORER</legend>
+        <legend>{sidebarPanel === 'search' ? 'SEARCH' : 'EXPLORER'}</legend>
+        <div id="explorer-panel" tabindex="-1">
+        {#if sidebarPanel === 'explorer'}
         <div class="library-switch">
         <button type="button" aria-pressed={!trash} onclick={() => runTab(async () => { trash = false; await browseLibrary(); })}>All Notes</button>
         <button type="button" aria-pressed={trash} onclick={() => runTab(async () => { trash = true; await browseLibrary(); })}>Trash</button></div>
+        {:else}
         <form class="library-search" onsubmit={event => { event.preventDefault(); runTab(() => browseLibrary()); }}>
           <label class="sr-only" for="library-search">Search titles and text</label><input id="library-search" placeholder="Search notes…" bind:value={libraryQuery} />
           <button type="submit" aria-label="Search or refresh notes" title="Search or refresh">↵</button>
         </form>
+        {/if}
+        </div>
         {#each library as item (item.id)}
           <button type="button" class="library-row" class:current={!trash && session.activeNoteId === item.id}
             title={titles[item.id] ?? item.title} aria-haspopup="true"

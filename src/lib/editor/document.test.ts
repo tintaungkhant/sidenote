@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { redo, undo } from '@codemirror/commands';
 import { copyText, decodeDocument, encodeDocument, type ImageBlock, type NoteDocument } from './document';
-import { createNoteState, imageField, insertImage, moveRange, textSearch } from './state';
+import { createNoteState, imageField, insertImage, textSearch } from './state';
 
 const image: ImageBlock = { kind: 'image', id: 'image-1' as ImageBlock['id'], attachmentId: 'asset-1' as ImageBlock['attachmentId'], annotations: [] };
 
@@ -58,27 +58,6 @@ describe('image history', () => {
     const text = 'a\r\nb\rc\n\uFFFC😀';
     const state = createNoteState({ version: 1, blocks: [{ kind: 'text', text }] });
     expect(state.doc.toString()).toBe(text);
-  });
-
-  test('moving mixed content in either direction preserves image identity', () => {
-    const document: NoteDocument = { version: 1, blocks: [{ kind: 'text', text: 'ab' }, image, { kind: 'text', text: 'cd' }] };
-    let state = createNoteState(document);
-    state = state.update(moveRange(state, 1, 3, 5)).state;
-    expect(state.doc.toString()).toBe('acdb\uFFFC');
-    expect(state.field(imageField)).toEqual([{ from: 4, block: image }]);
-    state = state.update(moveRange(state, 3, 5, 1)).state;
-    expect(decodeDocument({ text: state.doc.toString(), images: state.field(imageField) })).toEqual(document);
-  });
-
-  test('moving an image can be undone and redone with its annotations intact', () => {
-    const annotated: ImageBlock = { ...image, annotations: [{ kind: 'text', x: 2, y: 3, text: 'label', color: '#fff', fontSize: 12 }] };
-    let state = createNoteState({ version: 1, blocks: [annotated, { kind: 'text', text: 'ab' }] });
-    state = state.update(moveRange(state, 0, 1, 3)).state;
-    const target = { get state() { return state; }, dispatch(transaction: Parameters<Parameters<typeof undo>[0]['dispatch']>[0]) { state = transaction.state; } };
-    expect(undo(target)).toBe(true);
-    expect(state.field(imageField)).toEqual([{ from: 0, block: annotated }]);
-    expect(redo(target)).toBe(true);
-    expect(state.field(imageField)).toEqual([{ from: 2, block: annotated }]);
   });
 
   test('insertion at image boundary maps identity without swallowing text', () => {

@@ -71,3 +71,14 @@ test('immediate exit after pin and reorder saves exact session', async () => {
   expect(saver.status).toBe('Saved');
   saver.stop();
 });
+
+
+test('VS Code workspace shortcuts open Explorer, Search, and toggle wrap', () => {
+  const key = { key: 'e', ctrlKey: true, metaKey: false, altKey: false, shiftKey: true, isComposing: false };
+  expect(tabShortcut(key)).toBe('explorer');
+  expect(tabShortcut({ ...key, key: 'f' })).toBe('search');
+  expect(tabShortcut({ ...key, key: 'b', shiftKey: false })).toBe('sidebar');
+  expect(tabShortcut({ ...key, key: 'z', ctrlKey: false, shiftKey: false, altKey: true })).toBe('wrap');
+  expect(tabShortcut({ ...key, isComposing: true })).toBeUndefined();
+  expect(tabShortcut({ ...key, altKey: true })).toBeUndefined();
+});
