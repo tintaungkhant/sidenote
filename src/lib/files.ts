@@ -3,17 +3,146 @@ import type { Annotation } from './editor/document';
 export type Language = 'plaintext' | 'markdown' | 'javascript' | 'typescript' | 'php' | 'html' | 'css' | 'json';
 export type Metadata = { version: 1; main?: string; images: Record<string, { id: string; annotations: readonly Annotation[] }> };
 export type DiskDocument = { path: string; text: string; metadata: Metadata; revision: string };
-export type Buffer = { id: string; path: string | null; text: string; metadata: Metadata; baseline: string; revision: string; external: 'changed' | 'deleted' | 'unavailable' | null; anchor: number; head: number; scrollTop: number; pinned: boolean };
+export type Buffer = { id: string; path: string | null; name?: string; text: string; metadata: Metadata; baseline: string; revision: string; external: 'changed' | 'deleted' | 'unavailable' | null; anchor: number; head: number; scrollTop: number; pinned: boolean };
 export type Workspace = { version: 1; buffers: Buffer[]; active: string | null; root: string | null; wrap: boolean; sidebar: boolean };
 export type Entry = { path: string; relative: string; directory: boolean; line?: number; preview?: string };
+export type SearchMatch = { key: string; bufferId?: string; path?: string; label: string; line: number; preview: string; unsaved: boolean };
 export function languageFor(path: string | null): Language {
   return ({ md: 'markdown', markdown: 'markdown', js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript', ts: 'typescript', tsx: 'typescript', php: 'php', html: 'html', htm: 'html', css: 'css', json: 'json' } as Record<string, Language>)[path?.split('.').at(-1)?.toLowerCase() ?? ''] ?? 'plaintext';
+}
+export function bufferLanguage(buffer: Pick<Buffer, 'path' | 'name'>): Language {
+  if (buffer.path) return languageFor(buffer.path);
+  if (buffer.name?.includes('.')) return languageFor(buffer.name);
+  return 'markdown';
 }
 /** IPC object key order is not document content. Rust may return maps in sorted order. */
 export const fingerprint = (text: string, metadata: Metadata) => JSON.stringify([text, metadata], (_key,value) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.keys(value).sort().map(key => [key,value[key]])) : value);
 export const modified = (buffer: Buffer) => buffer.baseline !== fingerprint(buffer.text, buffer.metadata);
-export const title = (buffer: Buffer) => buffer.path?.split(/[/\\]/).at(-1) ?? 'Untitled';
-export function untitled(): Buffer { const metadata: Metadata = { version: 1, images: {} }; return { id: crypto.randomUUID(), path: null, text: '', metadata, baseline: fingerprint('', metadata), revision: '', external: null, anchor: 0, head: 0, scrollTop: 0, pinned: false }; }
+export const title = (buffer: Buffer) => buffer.path?.split(/[/\\]/).at(-1) ?? buffer.name ?? 'Untitled';
+export function preferredFileName(buffer: Pick<Buffer, 'path' | 'name'>): string {
+  const raw = (buffer.path?.split(/[/\\]/).at(-1) ?? buffer.name ?? 'Untitled-1').trim() || 'Untitled-1';
+  return raw.includes('.') ? raw : `${raw}.md`;
+}
+export function nextUntitledName(buffers: readonly Pick<Buffer, 'path' | 'name'>[], entries: readonly Pick<Entry, 'relative' | 'directory'>[] = []): string {
+  const taken = new Set<number>();
+  const record = (raw: string | undefined) => {
+    if (!raw) return;
+    const base = raw.split(/[/\\]/).at(-1) ?? raw;
+    const match = /^untitled-(\d+)(?:\.[^.]+)?$/i.exec(base.trim());
+    if (match) taken.add(Number(match[1]));
+  };
+  for (const b of buffers) { record(b.path ?? undefined); record(b.name); }
+  for (const e of entries) if (!e.directory && !e.relative.includes('/')) record(e.relative);
+  let n = 1;
+  while (taken.has(n)) n += 1;
+  return `Untitled-${n}`;
+}
+export function displayPath(path: string): string {
+  if (path.startsWith('\\\\?\\UNC\\')) return '\\\\' + path.slice(8);
+  if (path.startsWith('\\\\?\\')) return path.slice(4);
+  return path;
+}
+export function normalizePath(path: string): string {
+  const clean = displayPath(path).replace(/\\/g, '/');
+  return clean === '/' ? '/' : clean.replace(/\/+$/, '');
+}
+function isWindowsPath(path: string): boolean {
+  return /^[a-z]:/i.test(path) || path.startsWith('//');
+}
+export function samePath(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false;
+  const na = normalizePath(a), nb = normalizePath(b);
+  return isWindowsPath(na) || isWindowsPath(nb) ? na.toLowerCase() === nb.toLowerCase() : na === nb;
+}
+export function withinRoot(filePath: string | null | undefined, root: string | null | undefined): boolean {
+  if (!filePath || !root) return false;
+  let nf = normalizePath(filePath), nr = normalizePath(root);
+  if (isWindowsPath(nf) || isWindowsPath(nr)) { nf = nf.toLowerCase(); nr = nr.toLowerCase(); }
+  if (nr === '/') return nf.startsWith('/');
+  return nf === nr || nf.startsWith(`${nr}/`);
+}
+export function relativeToRoot(filePath: string, root: string | null | undefined): string {
+  if (root && withinRoot(filePath, root)) {
+    const nf = normalizePath(filePath), nr = normalizePath(root);
+    if (nr === '/') return nf.slice(1);
+    if (nf.length === nr.length) return filePath.split(/[/\\]/).at(-1) ?? nf;
+    return nf.slice(nr.length + 1);
+  }
+  return filePath.split(/[/\\]/).at(-1) ?? filePath;
+}
+export function isUnsavedBuffer(buffer: Pick<Buffer, 'path' | 'external'>, root: string | null): boolean {
+  return !buffer.path || buffer.external === 'deleted' || !withinRoot(buffer.path, root);
+}
+export function validateFileName(raw: string, fallbackExt = 'md'): string {
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed === '.' || trimmed === '..' || trimmed.length > 200 || trimmed.endsWith('.') || trimmed.endsWith(' ')) {
+    throw new Error('Invalid file name.');
+  }
+  if (/[\x00-\x1f/\\:<>\"|?*]/.test(trimmed)) {
+    throw new Error('File name contains unsupported characters.');
+  }
+  const lower = trimmed.toLowerCase();
+  if (lower === '.simple-note.json' || lower.endsWith('.simple-note.json')) {
+    throw new Error('That file name is reserved for metadata.');
+  }
+  const dot = trimmed.lastIndexOf('.');
+  const stem = dot >= 0 ? trimmed.slice(0, dot) : trimmed;
+  const ext = dot >= 0 ? trimmed.slice(dot + 1) : fallbackExt;
+  if (!stem || !ext || stem.endsWith(' ') || stem.endsWith('.')) {
+    throw new Error('Invalid file name.');
+  }
+  const base = stem.split('.')[0].trimEnd().toUpperCase();
+  if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(base)) {
+    throw new Error('That file name is reserved by the operating system.');
+  }
+  return `${stem}.${ext}`;
+}
+export function searchWorkspace(query: string, buffers: readonly Buffer[], diskMatches: readonly Entry[], root: string | null): SearchMatch[] {
+  if (!query) return [];
+  const needle = query.toLowerCase();
+  const results: SearchMatch[] = [];
+  const openPaths: string[] = [];
+  const scanBuffer = (buffer: Buffer, unsaved: boolean, label: string) => {
+    const lines = buffer.text.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].toLowerCase().includes(needle)) {
+        results.push({
+          key: `buf:${buffer.id}:${i + 1}`,
+          bufferId: buffer.id,
+          ...(buffer.path ? { path: buffer.path } : {}),
+          label,
+          line: i + 1,
+          preview: lines[i].slice(0, 240),
+          unsaved,
+        });
+        if (results.length >= 10000) return true;
+      }
+    }
+    return false;
+  };
+  for (const buffer of buffers) {
+    if (buffer.path && withinRoot(buffer.path, root) && buffer.external !== 'deleted') openPaths.push(buffer.path);
+    if (isUnsavedBuffer(buffer, root) && scanBuffer(buffer, true, title(buffer))) return results;
+  }
+  for (const buffer of buffers) {
+    if (!isUnsavedBuffer(buffer, root) && buffer.path && scanBuffer(buffer, false, relativeToRoot(buffer.path, root))) return results;
+  }
+  for (const entry of diskMatches) {
+    if (entry.directory || entry.line === undefined) continue;
+    if (openPaths.some(p => samePath(p, entry.path))) continue;
+    results.push({
+      key: `disk:${entry.path}:${entry.line}`,
+      path: entry.path,
+      label: entry.relative,
+      line: entry.line,
+      preview: entry.preview ?? '',
+      unsaved: false,
+    });
+    if (results.length >= 10000) return results;
+  }
+  return results;
+}
+export function untitled(name?: string): Buffer { const metadata: Metadata = { version: 1, images: {} }; return { id: crypto.randomUUID(), path: null, ...(name !== undefined ? { name } : {}), text: '', metadata, baseline: fingerprint('', metadata), revision: '', external: null, anchor: 0, head: 0, scrollTop: 0, pinned: false }; }
 export function opened(disk: DiskDocument): Buffer { return { ...untitled(), ...disk, baseline: fingerprint(disk.text, disk.metadata) }; }
 export function reconcile(buffer: Buffer, disk: DiskDocument | null): Buffer {
   if (!disk) return { ...buffer, external: 'deleted' };
@@ -37,7 +166,7 @@ export function recovered(value: unknown): Workspace {
   if (!w || w.version !== 1 || !Array.isArray(w.buffers) || w.buffers.length > 1000 || typeof w.wrap !== 'boolean' || typeof w.sidebar !== 'boolean' || !(w.root === null || typeof w.root === 'string')) throw new Error('Unsupported recovery session');
   const ids = new Set<string>();
   for (const b of w.buffers) {
-    if (!b || typeof b.id !== 'string' || ids.has(b.id) || !(b.path === null || typeof b.path === 'string') || typeof b.text !== 'string' || typeof b.baseline !== 'string' || typeof b.revision !== 'string' || typeof b.pinned !== 'boolean' || ![b.anchor,b.head,b.scrollTop].every(n => Number.isFinite(n) && n >= 0) || !b.metadata || b.metadata.version !== 1 || !b.metadata.images || typeof b.metadata.images !== 'object' || Array.isArray(b.metadata.images)) throw new Error('Invalid recovery buffer; original recovery was preserved');
+    if (!b || typeof b.id !== 'string' || ids.has(b.id) || !(b.path === null || typeof b.path === 'string') || !(b.name === undefined || (typeof b.name === 'string' && b.name.length <= 255)) || typeof b.text !== 'string' || typeof b.baseline !== 'string' || typeof b.revision !== 'string' || typeof b.pinned !== 'boolean' || ![b.anchor,b.head,b.scrollTop].every(n => Number.isFinite(n) && n >= 0) || !b.metadata || b.metadata.version !== 1 || !b.metadata.images || typeof b.metadata.images !== 'object' || Array.isArray(b.metadata.images)) throw new Error('Invalid recovery buffer; original recovery was preserved');
     if (!Number.isSafeInteger(b.anchor) || !Number.isSafeInteger(b.head)) throw new Error('Invalid recovery selection');
     ids.add(b.id);
     const baseline = JSON.parse(b.baseline);

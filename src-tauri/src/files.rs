@@ -100,6 +100,74 @@ fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     tmp.persist(path).map_err(fail)?;
     Ok(())
 }
+fn atomic_noclobber(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut tmp =
+        tempfile::NamedTempFile::new_in(path.parent().ok_or_else(|| fail("No parent directory"))?)
+            .map_err(fail)?;
+    tmp.write_all(bytes).map_err(fail)?;
+    tmp.as_file().sync_all().map_err(fail)?;
+    tmp.persist_noclobber(path).map_err(fail)?;
+    Ok(())
+}
+fn not_present(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(fail(e)),
+    }
+}
+fn is_available(path: &Path) -> Result<bool> {
+    Ok(not_present(path)? && not_present(&companion(path)?)?)
+}
+fn sanitize_stem_ext(preferred: Option<&str>) -> Result<(String, String)> {
+    let raw = preferred.map(str::trim).filter(|s| !s.is_empty());
+    let name = raw.unwrap_or("Untitled-1.md");
+    if name == "."
+        || name == ".."
+        || name.chars().count() > 200
+        || name.ends_with('.')
+        || name.ends_with(' ')
+    {
+        return Err(fail("Invalid file name"));
+    }
+    let lower = name.to_ascii_lowercase();
+    if lower == ".simple-note.json" || lower.ends_with(".simple-note.json") {
+        return Err(fail("Reserved metadata file name"));
+    }
+    if name.chars().any(|c| {
+        c.is_control() || matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+    }) {
+        return Err(fail("File name contains unsupported characters"));
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(pos) => (&name[..pos], &name[pos + 1..]),
+        None => (name, "md"),
+    };
+    if stem.is_empty() || ext.is_empty() || stem.ends_with(' ') || stem.ends_with('.') {
+        return Err(fail("Invalid file name"));
+    }
+    let base = stem.split('.').next().unwrap_or(stem).trim_end_matches(' ');
+    let upper = base.to_ascii_uppercase();
+    let reserved = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (upper.len() == 4
+            && (upper.starts_with("COM") || upper.starts_with("LPT"))
+            && upper.as_bytes()[3].is_ascii_digit()
+            && upper.as_bytes()[3] != b'0');
+    if reserved {
+        return Err(fail("Reserved system file name"));
+    }
+    Ok((stem.to_owned(), ext.to_owned()))
+}
+fn strip_numeric_suffix(stem: &str) -> &str {
+    if let Some((prefix, suffix)) = stem.rsplit_once('-')
+        && !prefix.is_empty()
+        && !suffix.is_empty()
+        && suffix.bytes().all(|b| b.is_ascii_digit())
+    {
+        return prefix;
+    }
+    stem
+}
 /// Unlike rename-with-replace, Windows ReplaceFile refuses to resurrect a deleted destination.
 fn replace_existing(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut tmp = tempfile::NamedTempFile::new_in(path.parent().unwrap()).map_err(fail)?;
@@ -419,6 +487,178 @@ impl FileStore {
         fs::rename(stage.path(), &folder).map_err(fail)?;
         load(&folder.join(name))
     }
+    fn create_in_root(
+        &self,
+        root: &Path,
+        preferred: Option<&str>,
+        source: &str,
+        metadata: &Value,
+        origin: Option<&Path>,
+        assets: &[SourceReference],
+    ) -> Result<DiskDocument> {
+        validate_metadata(metadata)?;
+        if source.len() as u64 > MAX_TEXT {
+            return Err(fail("Text exceeds 8 MiB"));
+        }
+        let root = fs::canonicalize(root).map_err(fail)?;
+        if !root.is_dir() {
+            return Err(fail("Root path is not a folder"));
+        }
+        let (stem, ext) = sanitize_stem_ext(preferred)?;
+        let initial = root.join(format!("{stem}.{ext}"));
+        let target = if is_available(&initial)? {
+            initial
+        } else {
+            let base = strip_numeric_suffix(&stem);
+            let mut found = None;
+            for n in 1..=100_000 {
+                let candidate = root.join(format!("{base}-{n}.{ext}"));
+                if is_available(&candidate)? {
+                    found = Some(candidate);
+                    break;
+                }
+            }
+            found.ok_or_else(|| fail("Too many files with that name in root folder"))?
+        };
+        let mut rewritten = source.to_owned();
+        let mut meta = metadata.clone();
+        if !assets.is_empty() {
+            let assets_folder = root.join("assets");
+            fs::create_dir_all(&assets_folder).map_err(fail)?;
+            let canonical_assets = fs::canonicalize(&assets_folder).map_err(fail)?;
+            if !canonical_assets.starts_with(&root)
+                || canonical_assets.parent() != Some(root.as_path())
+            {
+                return Err(fail("Assets folder points outside the root folder"));
+            }
+            let mut mappings = std::collections::BTreeMap::new();
+            for asset in assets {
+                let reference = &asset.path;
+                if mappings.contains_key(reference) {
+                    continue;
+                }
+                if let Some(relative) = reference.strip_prefix("recovery:") {
+                    if !relative
+                        .strip_prefix("assets/")
+                        .is_some_and(|name| !name.is_empty() && !name.contains('/'))
+                    {
+                        return Err(fail("Invalid recovery asset reference"));
+                    }
+                    let bytes = read(&asset_path(&self.recovery, relative)?, 20 * 1024 * 1024)?;
+                    validate_image(&bytes)?;
+                    let img_ext =
+                        if image::guess_format(&bytes).map_err(fail)? == image::ImageFormat::Png {
+                            "png"
+                        } else {
+                            "jpg"
+                        };
+                    let filename = Path::new(relative)
+                        .file_name()
+                        .ok_or_else(|| fail("Invalid asset name"))?;
+                    let candidate = assets_folder.join(filename);
+                    let destination = if candidate.exists() {
+                        if read(&candidate, 20 * 1024 * 1024)? == bytes {
+                            format!("./{relative}")
+                        } else {
+                            let new_rel = format!("assets/{}.{img_ext}", uuid::Uuid::new_v4());
+                            atomic_noclobber(&root.join(&new_rel), &bytes)?;
+                            format!("./{new_rel}")
+                        }
+                    } else {
+                        atomic_noclobber(&candidate, &bytes)?;
+                        format!("./{relative}")
+                    };
+                    mappings.insert(reference.clone(), destination.clone());
+                    if let Some(value) = meta["images"].as_object_mut().unwrap().remove(reference) {
+                        meta["images"][&destination] = value;
+                    }
+                } else {
+                    let origin = origin.ok_or_else(|| fail("Image has no source folder"))?;
+                    let original = asset_path(origin, reference)?;
+                    let bytes = read(&original, 20 * 1024 * 1024)?;
+                    validate_image(&bytes)?;
+                    let same_root = fs::canonicalize(origin).ok().as_ref() == Some(&root);
+                    if same_root && asset_path(&root, reference).is_ok() {
+                        continue;
+                    }
+                    let img_ext =
+                        if image::guess_format(&bytes).map_err(fail)? == image::ImageFormat::Png {
+                            "png"
+                        } else {
+                            "jpg"
+                        };
+                    let new_rel = format!("assets/{}.{img_ext}", uuid::Uuid::new_v4());
+                    atomic_noclobber(&root.join(&new_rel), &bytes)?;
+                    let destination = format!("./{new_rel}");
+                    mappings.insert(reference.clone(), destination.clone());
+                    if let Some(value) = meta["images"].as_object_mut().unwrap().remove(reference) {
+                        meta["images"][&destination] = value;
+                    }
+                }
+            }
+            rewritten = rewrite(&rewritten, assets, &mappings)?;
+        }
+        if let Some(obj) = meta.as_object_mut() {
+            obj.remove("main");
+        }
+        atomic_noclobber(&target, rewritten.as_bytes())?;
+        let sidecar = root.join(format!(
+            "{}.simple-note.json",
+            target.file_name().unwrap().to_string_lossy()
+        ));
+        atomic(&sidecar, &serde_json::to_vec_pretty(&meta).map_err(fail)?)?;
+        load(&target)
+    }
+    fn rename(&self, root: &Path, path: &Path, name: &str) -> Result<DiskDocument> {
+        let root = fs::canonicalize(root).map_err(fail)?;
+        if !root.is_dir() {
+            return Err(fail("Root path is not a folder"));
+        }
+        let current = fs::canonicalize(path).map_err(fail)?;
+        if !current.starts_with(&root) || current == root {
+            return Err(fail("File is outside the workspace root"));
+        }
+        let trimmed = name.trim();
+        let (stem, parsed_ext) = sanitize_stem_ext(Some(trimmed))?;
+        let ext = if trimmed.contains('.') {
+            parsed_ext
+        } else {
+            current
+                .extension()
+                .and_then(|e| e.to_str())
+                .filter(|e| !e.is_empty())
+                .map(str::to_owned)
+                .unwrap_or(parsed_ext)
+        };
+        let final_name = format!("{stem}.{ext}");
+        let parent = current
+            .parent()
+            .ok_or_else(|| fail("No parent directory"))?;
+        let target = parent.join(&final_name);
+        if target == current {
+            return load(&current);
+        }
+        if !is_available(&target)? {
+            return Err(fail("A file with that name already exists"));
+        }
+        let _ = load(&current)?;
+        let old_sidecar = companion(&current)?;
+        fs::rename(&current, &target).map_err(fail)?;
+        if old_sidecar.file_name() == Some(std::ffi::OsStr::new(".simple-note.json")) {
+            let mut meta: Value = serde_json::from_str(&text(&old_sidecar)?).map_err(fail)?;
+            if let Some(obj) = meta.as_object_mut() {
+                obj.insert("main".into(), json!(final_name));
+            }
+            atomic(
+                &old_sidecar,
+                &serde_json::to_vec_pretty(&meta).map_err(fail)?,
+            )?;
+        } else if old_sidecar.exists() {
+            let new_sidecar = parent.join(format!("{final_name}.simple-note.json"));
+            fs::rename(&old_sidecar, &new_sidecar).map_err(fail)?;
+        }
+        load(&target)
+    }
     fn snapshot(&self, snapshot: &str) -> Result<()> {
         if snapshot.len() > 64 * 1024 * 1024 {
             return Err(fail("Recovery exceeds 64 MiB"));
@@ -468,6 +708,19 @@ pub enum Operation {
         metadata: Value,
         origin: Option<String>,
         assets: Vec<SourceReference>,
+    },
+    CreateInRoot {
+        root: String,
+        preferred: Option<String>,
+        text: String,
+        metadata: Value,
+        origin: Option<String>,
+        assets: Vec<SourceReference>,
+    },
+    Rename {
+        root: String,
+        path: String,
+        name: String,
     },
     Recover,
     Snapshot {
@@ -526,7 +779,7 @@ fn browse(root: &Path, query: &str) -> Result<Value> {
             if kind.is_dir() {
                 if matches!(
                     entry.file_name().to_str(),
-                    Some(".git" | "node_modules" | "target")
+                    Some(".git" | "node_modules" | "target" | "assets")
                 ) {
                     continue;
                 }
@@ -535,6 +788,11 @@ fn browse(root: &Path, query: &str) -> Result<Value> {
                 }
                 visit(root, &p, query, entries, visited, depth + 1)?;
             } else if kind.is_file() {
+                let file_name = entry.file_name();
+                let name = file_name.to_string_lossy();
+                if name == ".simple-note.json" || name.ends_with(".simple-note.json") {
+                    continue;
+                }
                 if query.is_empty() {
                     entries.push(json!({"path":p,"relative":relative,"directory":false}));
                 } else if let Ok(source) = text(&p) {
@@ -602,6 +860,26 @@ pub async fn file_operation(
                 &metadata,
                 origin.as_deref().map(Path::new),
                 &assets
+            )?)),
+            Operation::CreateInRoot {
+                root,
+                preferred,
+                text,
+                metadata,
+                origin,
+                assets,
+            } => Ok(json!(store.create_in_root(
+                Path::new(&root),
+                preferred.as_deref(),
+                &text,
+                &metadata,
+                origin.as_deref().map(Path::new),
+                &assets
+            )?)),
+            Operation::Rename { root, path, name } => Ok(json!(store.rename(
+                Path::new(&root),
+                Path::new(&path),
+                &name
             )?)),
             Operation::Recover => {
                 let p = recovery.join("session.json");
@@ -938,5 +1216,90 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn create_in_root_autonames_without_overwriting_and_materializes_recovery_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        let store = FileStore::new(dir.path().join("app")).unwrap();
+        let image = png();
+        fs::write(store.recovery.join("assets/a.png"), &image).unwrap();
+        let path = "recovery:assets/a.png";
+        let source = format!("First note\n![image]({path})\n");
+        let first = store
+            .create_in_root(
+                &root,
+                Some("Untitled-1.md"),
+                &source,
+                &metadata(path),
+                None,
+                &[reference(&source, path)],
+            )
+            .unwrap();
+        assert_eq!(first.text, "First note\n![image](./assets/a.png)\n");
+        assert!(root.join("Untitled-1.md").exists());
+        assert!(root.join("Untitled-1.md.simple-note.json").exists());
+        assert!(root.join("assets/a.png").exists());
+        let empty = json!({"version":1,"images":{}});
+        let second = store
+            .create_in_root(
+                &root,
+                Some("Untitled-1.md"),
+                "Second note",
+                &empty,
+                None,
+                &[],
+            )
+            .unwrap();
+        assert!(root.join("Untitled-2.md").exists());
+        assert_eq!(second.text, "Second note");
+        assert_eq!(
+            text(&root.join("Untitled-1.md")).unwrap(),
+            "First note\n![image](./assets/a.png)\n"
+        );
+        let listed = browse(&root, "").unwrap();
+        let relatives: Vec<_> = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["relative"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(relatives, vec!["Untitled-1.md", "Untitled-2.md"]);
+    }
+    #[test]
+    fn rename_stays_within_root_moves_sidecar_and_refuses_collisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("workspace");
+        let outside = dir.path().join("outside.md");
+        fs::create_dir(&root).unwrap();
+        fs::write(&outside, "outside").unwrap();
+        let store = FileStore::new(dir.path().join("app")).unwrap();
+        let empty = json!({"version":1,"images":{}});
+        let doc = store
+            .create_in_root(&root, Some("Untitled-1.md"), "hello", &empty, None, &[])
+            .unwrap();
+        store
+            .create_in_root(&root, Some("taken.md"), "taken", &empty, None, &[])
+            .unwrap();
+        let renamed = store
+            .rename(&root, Path::new(&doc.path), "sample.md")
+            .unwrap();
+        assert!(!root.join("Untitled-1.md").exists());
+        assert!(!root.join("Untitled-1.md.simple-note.json").exists());
+        assert!(root.join("sample.md").exists());
+        assert!(root.join("sample.md.simple-note.json").exists());
+        assert_eq!(renamed.text, "hello");
+        assert!(
+            store
+                .rename(&root, Path::new(&renamed.path), "../escape.md")
+                .is_err()
+        );
+        assert!(
+            store
+                .rename(&root, Path::new(&renamed.path), "taken.md")
+                .is_err()
+        );
+        assert!(store.rename(&root, &outside, "hijack.md").is_err());
     }
 }
