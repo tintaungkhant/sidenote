@@ -13,7 +13,8 @@
   import { css } from '@codemirror/lang-css';
   import { php } from '@codemirror/lang-php';
   import { listen } from '@tauri-apps/api/event';
-  import { invoke } from '@tauri-apps/api/core';
+  import { invoke, isTauri } from '@tauri-apps/api/core';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
   import AnnotationEditor from '$lib/editor/AnnotationEditor.svelte';
   import type { Annotation, AttachmentId, ImageBlock } from '$lib/editor/document';
   import { flattenImage } from '$lib/editor/image-output';
@@ -29,6 +30,11 @@
   let active = $derived(workspace.buffers.find(b => b.id === workspace.active));
   let unsavedBuffers = $derived(workspace.buffers.filter(b => files.isUnsavedBuffer(b, workspace.root)));
   let host: HTMLDivElement;
+  let customWindowControls = $state(false), macTitlebar = $state(false);
+  function windowAction(action: 'minimize' | 'maximize' | 'close') {
+    const work = action === 'close' ? storage.requestExit() : action === 'minimize' ? getCurrentWindow().minimize() : getCurrentWindow().toggleMaximize();
+    void work.catch(error => { notice = errorMessage(error); });
+  }
   let view: EditorView | undefined;
   let viewId: string | undefined;
   const states = new Map<string, EditorState>();
@@ -1460,6 +1466,12 @@
     });
   }
   onMount(() => {
+    if (isTauri()) {
+      macTitlebar = /Mac/.test(navigator.platform);
+      void getCurrentWindow().isDecorated().then(decorated => {
+        if (!disposed) customWindowControls = !decorated;
+      }).catch(error => { notice = errorMessage(error); });
+    }
     let unlisten: (() => void) | undefined;
     boot = (async () => {
       unlisten = await listen('flush-before-exit', () => { void exit(); });
@@ -1508,14 +1520,21 @@
 
 <svelte:head><title>Sidenote</title></svelte:head>
 <main class="flex h-dvh flex-col bg-[var(--bg-app)] text-sm text-[var(--text-primary)]" aria-busy={busy || loading || frozen}>
-  <header class="app-header">
-    <div class="app-brand"><img class="app-mark" src="/app-icon.png" alt=""/><span class="app-title">Sidenote</span></div>
+  <header class="app-header" class:mac-titlebar={macTitlebar} class:custom-titlebar={customWindowControls} data-tauri-drag-region>
+    <div class="app-brand" data-tauri-drag-region><img class="app-mark" src="/app-icon.png" alt=""/><span class="app-title">Sidenote</span></div>
     <nav class="app-menubar" aria-label="Application menus">
       {#each ['File','Edit','View'] as name}<button type="button" aria-haspopup="true" onclick={event => menu(event,`app-${name}`)}>{name}</button>{/each}
     </nav>
-    <div class="header-center"><button class="header-search-pill" onclick={() => run(() => showPanel('search'))}>Search <kbd>Ctrl+Shift+F</kbd></button></div>
+    <div class="header-center" data-tauri-drag-region><button class="header-search-pill" onclick={() => run(() => showPanel('search'))}>Search <kbd>Ctrl+Shift+F</kbd></button></div>
     <button class="header-btn" disabled={!active || busy || loading || frozen} onclick={() => run(() => saveFile().then(() => {}))}>Save <kbd>Ctrl+S</kbd></button>
     <button class="header-btn" disabled={!active || !canCommitActive || busy || loading || frozen} onclick={() => run(() => beginCommit(workspace.active))}>Commit</button>
+    {#if customWindowControls}
+      <div class="window-controls" role="group" aria-label="Window controls">
+        <button type="button" aria-label="Minimize window" title="Minimize" onclick={() => windowAction('minimize')}><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M1 6h10"/></svg></button>
+        <button type="button" aria-label="Maximize or restore window" title="Maximize or restore" onclick={() => windowAction('maximize')}><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M1.5 1.5h9v9h-9z"/></svg></button>
+        <button type="button" class="window-close" aria-label="Close window" title="Close" onclick={() => windowAction('close')}><svg viewBox="0 0 12 12" aria-hidden="true"><path d="m1 1 10 10M11 1 1 11"/></svg></button>
+      </div>
+    {/if}
     <div id="app-File" popover class="command-menu">
       <button onclick={() => command(newFile)}>New file <kbd>Ctrl+N</kbd></button>
       <button onclick={() => command(setRootFolder)}>{workspace.root ? 'Change root folder…' : 'Set root folder…'} <kbd>Ctrl+O</kbd></button>
