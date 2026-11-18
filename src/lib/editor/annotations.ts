@@ -1,6 +1,77 @@
 import type { Annotation } from './document';
 export type Point = { x: number; y: number };
 export type Tool = 'select' | 'pen' | 'highlighter' | 'arrow' | 'rectangle' | 'circle' | 'text';
+export type Viewport = { zoom: number; x: number; y: number };
+export const MIN_ZOOM = 0.05;
+export const MAX_ZOOM = 32;
+
+/** Clamp zoom to supported bounds and keep an edge of the canvas reachable within the stage. */
+export function clampViewport(viewport: Viewport, stageWidth: number, stageHeight: number, imageWidth: number, imageHeight: number): Viewport {
+  const zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, viewport.zoom));
+  if (stageWidth <= 0 || stageHeight <= 0 || imageWidth <= 0 || imageHeight <= 0) return { ...viewport, zoom };
+  const w = imageWidth * zoom, h = imageHeight * zoom;
+  const marginX = Math.min(48, stageWidth * 0.25, w * 0.5);
+  const marginY = Math.min(48, stageHeight * 0.25, h * 0.5);
+  return {
+    zoom,
+    x: Math.max(marginX - w, Math.min(stageWidth - marginX, viewport.x)),
+    y: Math.max(marginY - h, Math.min(stageHeight - marginY, viewport.y))
+  };
+}
+
+/** Center and fit the image inside the stage, optionally capping initial open at 100% natural scale. */
+export function fitViewport(stageWidth: number, stageHeight: number, imageWidth: number, imageHeight: number, capAtActualSize = false): Viewport {
+  if (stageWidth <= 0 || stageHeight <= 0 || imageWidth <= 0 || imageHeight <= 0) return { zoom: 1, x: 0, y: 0 };
+  const pad = Math.min(32, stageWidth * 0.08, stageHeight * 0.08);
+  const raw = Math.min(Math.max(1, stageWidth - pad * 2) / imageWidth, Math.max(1, stageHeight - pad * 2) / imageHeight);
+  const zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, capAtActualSize ? Math.min(1, raw) : raw));
+  return { zoom, x: (stageWidth - imageWidth * zoom) / 2, y: (stageHeight - imageHeight * zoom) / 2 };
+}
+
+/** Zoom around a stage-relative anchor point so the image pixel under the cursor stays fixed. */
+export function zoomAtPoint(viewport: Viewport, nextZoom: number, anchorX: number, anchorY: number, stageWidth: number, stageHeight: number, imageWidth: number, imageHeight: number): Viewport {
+  const zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, nextZoom));
+  const ratio = zoom / viewport.zoom;
+  return clampViewport({ zoom, x: anchorX - (anchorX - viewport.x) * ratio, y: anchorY - (anchorY - viewport.y) * ratio }, stageWidth, stageHeight, imageWidth, imageHeight);
+}
+
+/** Reset zoom to 100%, keeping the current focus centered on large images and centering small ones. */
+export function resetViewport(viewport: Viewport, stageWidth: number, stageHeight: number, imageWidth: number, imageHeight: number): Viewport {
+  const next = zoomAtPoint(viewport, 1, stageWidth / 2, stageHeight / 2, stageWidth, stageHeight, imageWidth, imageHeight);
+  return clampViewport({
+    zoom: 1,
+    x: imageWidth <= stageWidth ? (stageWidth - imageWidth) / 2 : next.x,
+    y: imageHeight <= stageHeight ? (stageHeight - imageHeight) / 2 : next.y
+  }, stageWidth, stageHeight, imageWidth, imageHeight);
+}
+
+/** Smooth 25% discrete zoom steps that snap cleanly back onto 100%. */
+export function stepZoom(zoom: number, direction: 1 | -1): number {
+  const raw = direction > 0 ? zoom * 1.25 : zoom / 1.25;
+  return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Math.abs(raw - 1) < 0.03 ? 1 : raw));
+}
+
+/** Figma-style wheel routing: Ctrl/Cmd or trackpad pinch zooms at cursor; plain wheel pans (Shift for horizontal). */
+export function applyWheel(
+  viewport: Viewport,
+  event: { deltaX: number; deltaY: number; deltaMode: number; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean },
+  anchorX: number,
+  anchorY: number,
+  stageWidth: number,
+  stageHeight: number,
+  imageWidth: number,
+  imageHeight: number
+): Viewport {
+  const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 100 : 1;
+  let dx = event.deltaX * unit, dy = event.deltaY * unit;
+  if (event.ctrlKey || event.metaKey) {
+    const delta = dy !== 0 ? dy : dx;
+    const clamped = Math.sign(delta) * Math.min(Math.abs(delta), 24);
+    return zoomAtPoint(viewport, viewport.zoom * Math.exp(-clamped * 0.01), anchorX, anchorY, stageWidth, stageHeight, imageWidth, imageHeight);
+  }
+  if (event.shiftKey && dx === 0) { dx = dy; dy = 0; }
+  return clampViewport({ ...viewport, x: viewport.x - dx, y: viewport.y - dy }, stageWidth, stageHeight, imageWidth, imageHeight);
+}
 
 /** Focused-view history contains completed immutable operations only; a new edit clears redo. */
 export class AnnotationHistory {
@@ -77,7 +148,8 @@ export function captionLayout(text: string, width: number, height: number) {
   return { fontSize, padding, lines, top };
 }
 
-export function annotationSvg(annotations: readonly Annotation[], selected = -1, editing = -1, width = 0, height = 0): string {
+export function annotationSvg(annotations: readonly Annotation[], selected = -1, editing = -1, width = 0, height = 0, zoom = 1): string {
+  const inv = zoom > 0 ? 1 / zoom : 1;
   return annotations.map((a, index) => {
     if (a.kind === 'caption') {
       if (!a.text || index === editing) return '';
@@ -102,10 +174,10 @@ export function annotationSvg(annotations: readonly Annotation[], selected = -1,
     // Selection chrome is editor-only. Plain exports call this renderer without a selected index.
     let chrome = '';
     if (index === selected && index !== editing) {
-      const b = annotationBounds(a), w = Math.max(8, b.right - b.left), h = Math.max(8, b.bottom - b.top);
+      const b = annotationBounds(a), w = Math.max(8 * inv, b.right - b.left), h = Math.max(8 * inv, b.bottom - b.top);
       chrome = `<rect x="${b.left}" y="${b.top}" width="${w}" height="${h}" fill="transparent" stroke="#75beff" stroke-width="1" vector-effect="non-scaling-stroke" style="cursor:move"/>` +
-        `<rect x="${b.left - 3}" y="${b.top - 3}" width="6" height="6" fill="#252526" stroke="#75beff" vector-effect="non-scaling-stroke" style="cursor:move"/>` +
-        `<rect data-resize="true" x="${b.left + w - 5}" y="${b.top + h - 5}" width="10" height="10" fill="#75beff" stroke="#252526" vector-effect="non-scaling-stroke" style="cursor:nwse-resize"/>`;
+        `<rect x="${b.left - 3 * inv}" y="${b.top - 3 * inv}" width="${6 * inv}" height="${6 * inv}" fill="#252526" stroke="#75beff" stroke-width="1" vector-effect="non-scaling-stroke" style="cursor:move"/>` +
+        `<rect data-resize="true" x="${b.left + w - 5 * inv}" y="${b.top + h - 5 * inv}" width="${10 * inv}" height="${10 * inv}" fill="#75beff" stroke="#252526" stroke-width="1" vector-effect="non-scaling-stroke" style="cursor:nwse-resize"/>`;
     }
     return `<g data-annotation="${index}">${index === editing ? '' : shape}${chrome}</g>`;
   }).join('');
@@ -116,6 +188,19 @@ export function annotationKey(event: { key: string; ctrlKey: boolean; metaKey: b
   if (event.isComposing) return;
   if (event.key === 'Escape') return 'exit';
   if (editing) return;
-  if (event.ctrlKey || event.metaKey) return event.key.toLowerCase() === 'z' ? (event.shiftKey ? 'redo' : 'undo') : event.key.toLowerCase() === 'y' ? 'redo' : undefined;
+  if (event.ctrlKey || event.metaKey) {
+    const lower = event.key.toLowerCase();
+    if (lower === 'z') return event.shiftKey ? 'redo' : 'undo';
+    if (lower === 'y') return 'redo';
+    if (event.key === '=' || event.key === '+') return 'zoom-in';
+    if (event.key === '-' || event.key === '_') return 'zoom-out';
+    if (event.key === '0' || event.key === ')') return 'zoom-reset';
+    if (event.key === '1' || event.key === '!') return 'zoom-fit';
+    return undefined;
+  }
+  if (event.key === '=' || event.key === '+') return 'zoom-in';
+  if (event.key === '-' || event.key === '_') return 'zoom-out';
+  if (event.key === '!' || (event.shiftKey && event.key === '1')) return 'zoom-fit';
+  if (event.key === ')' || (event.shiftKey && event.key === '0')) return 'zoom-reset';
   return ({ v: 'select', p: 'pen', h: 'highlighter', a: 'arrow', r: 'rectangle', c: 'circle', t: 'text', Tab: 'cycle', Delete: 'delete', Backspace: 'delete', ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down' } as Record<string, string>)[event.key];
 }

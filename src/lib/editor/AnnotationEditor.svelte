@@ -2,14 +2,18 @@
   import { onMount, untrack, tick } from 'svelte';
   import { errorMessage } from '$lib/autosave';
   import type { Annotation, ImageBlock } from './document';
-  import { AnnotationHistory, annotationKey, annotationSvg, imagePoint, translate, annotationBounds, resizeAnnotation, type Point, type Tool } from './annotations';
+  import { AnnotationHistory, MIN_ZOOM, MAX_ZOOM, annotationKey, annotationSvg, imagePoint, translate, annotationBounds, resizeAnnotation, clampViewport, fitViewport, zoomAtPoint, resetViewport, stepZoom, applyWheel, type Point, type Tool, type Viewport } from './annotations';
   let { block, blob, status, onchange, onclose, onoutput }: { block: ImageBlock; blob: Blob; status: string; onchange: (annotations: readonly Annotation[]) => void; onclose: () => void;
     onoutput: (action: 'copy' | 'export', annotations: readonly Annotation[], width: number, height: number) => Promise<string> } = $props();
   let annotations = $state.raw<readonly Annotation[]>(untrack(() => block.annotations));
   const operations = new AnnotationHistory(untrack(() => annotations));
   let tool = $state<Tool>('select'), color = $state('#ff4444'), width = $state(4);
   let selected = $state(-1), imageWidth = $state(0), imageHeight = $state(0), url = $state('');
-  let surface = $state<SVGSVGElement>(null!), dialog: HTMLDialogElement;
+  let surface = $state<SVGSVGElement>(null!), stage = $state<HTMLDivElement>(null!), dialog: HTMLDialogElement;
+  let stageWidth = $state(0), stageHeight = $state(0);
+  let viewport = $state<Viewport>({ zoom: 1, x: 0, y: 0 });
+  let fitted = $state(true), spaceHeld = $state(false);
+  let panGesture = $state.raw<{ pointer: number; startX: number; startY: number; originX: number; originY: number } | undefined>();
   let gesture = $state.raw<{ start: Point; original?: Annotation; draft?: Annotation; pointer: number; resize?: boolean } | undefined>();
   // Track completed clicks before SVG capture/selection redraws can discard the native dblclick target.
   let captionClick: { index: number; time: number; x: number; y: number } | undefined;
@@ -35,8 +39,100 @@
     { value: '#44cc66', name: 'Green' }, { value: '#3399ff', name: 'Blue' },
     { value: '#ffffff', name: 'White' }, { value: '#000000', name: 'Black' } ];
 
-  /** The focused view owns its decoded image URL and restores note focus through the caller. */
-  onMount(() => { url = URL.createObjectURL(blob); dialog.showModal(); dialog.focus(); return () => { dialog.close(); URL.revokeObjectURL(url); }; });
+  /** The focused view owns its decoded image URL, Figma-style wheel/resize listeners, and focus lifecycle. */
+  onMount(() => {
+    url = URL.createObjectURL(blob);
+    dialog.showModal();
+    dialog.focus();
+    stageWidth = stage.clientWidth;
+    stageHeight = stage.clientHeight;
+    const observer = new ResizeObserver(() => {
+      if (!stage) return;
+      const nextW = stage.clientWidth, nextH = stage.clientHeight;
+      if (nextW === stageWidth && nextH === stageHeight) return;
+      const prevW = stageWidth, prevH = stageHeight;
+      stageWidth = nextW; stageHeight = nextH;
+      if (!imageWidth) return;
+      if (fitted) viewport = fitViewport(nextW, nextH, imageWidth, imageHeight, true);
+      else if (prevW && prevH) viewport = clampViewport({ ...viewport, x: viewport.x + (nextW - prevW) / 2, y: viewport.y + (nextH - prevH) / 2 }, nextW, nextH, imageWidth, imageHeight);
+    });
+    observer.observe(stage);
+    const onWheel = (event: WheelEvent) => {
+      const inStage = stage?.contains(event.target as Node);
+      if (event.ctrlKey || event.metaKey) event.preventDefault();
+      if (!inStage || outputBusy || !imageWidth) return;
+      if (!event.ctrlKey && !event.metaKey && event.target instanceof HTMLTextAreaElement && event.target.scrollHeight > event.target.clientHeight) return;
+      event.preventDefault();
+      const rect = stage.getBoundingClientRect();
+      fitted = false;
+      viewport = applyWheel(viewport, event, event.clientX - rect.left, event.clientY - rect.top, rect.width, rect.height, imageWidth, imageHeight);
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (event.code === 'Space' || event.key === ' ') spaceHeld = false;
+    };
+    const onWindowBlur = () => { spaceHeld = false; panGesture = undefined; };
+    dialog.addEventListener('wheel', onWheel, { passive: false });
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onWindowBlur);
+    return () => {
+      observer.disconnect();
+      dialog.removeEventListener('wheel', onWheel);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onWindowBlur);
+      dialog.close();
+      URL.revokeObjectURL(url);
+    };
+  });
+
+  function zoomBy(direction: 1 | -1) {
+    if (!imageWidth || !stageWidth) return;
+    fitted = false;
+    viewport = zoomAtPoint(viewport, stepZoom(viewport.zoom, direction), stageWidth / 2, stageHeight / 2, stageWidth, stageHeight, imageWidth, imageHeight);
+  }
+  function zoomToFit(capAtActualSize = false) {
+    if (!imageWidth || !stageWidth) return;
+    fitted = capAtActualSize;
+    viewport = fitViewport(stageWidth, stageHeight, imageWidth, imageHeight, capAtActualSize);
+  }
+  function zoomToActual() {
+    if (!imageWidth || !stageWidth) return;
+    fitted = false;
+    viewport = resetViewport(viewport, stageWidth, stageHeight, imageWidth, imageHeight);
+  }
+
+  /** Space+drag or middle-mouse drag pans the viewport regardless of active tool, matching Figma. */
+  function startPanCapture(event: PointerEvent) {
+    if (outputBusy || !imageWidth || gesture || panGesture) return;
+    if (event.button === 1 || (event.button === 0 && spaceHeld)) {
+      event.preventDefault();
+      event.stopPropagation();
+      panGesture = { pointer: event.pointerId, startX: event.clientX, startY: event.clientY, originX: viewport.x, originY: viewport.y };
+      stage.setPointerCapture(event.pointerId);
+    }
+  }
+  function startStage(event: PointerEvent) {
+    if (outputBusy || !imageWidth || gesture || panGesture) return;
+    if (event.button === 0 && event.target === stage) {
+      editingCaption = false;
+      editingText = false;
+      select(-1);
+      surface?.focus();
+    }
+  }
+  function moveStage(event: PointerEvent) {
+    if (!panGesture || event.pointerId !== panGesture.pointer) return;
+    fitted = false;
+    viewport = clampViewport({
+      ...viewport,
+      x: panGesture.originX + (event.clientX - panGesture.startX),
+      y: panGesture.originY + (event.clientY - panGesture.startY)
+    }, stageWidth, stageHeight, imageWidth, imageHeight);
+  }
+  function finishStage(event: PointerEvent) {
+    if (!panGesture || event.pointerId !== panGesture.pointer) return;
+    panGesture = undefined;
+    if (stage.hasPointerCapture(event.pointerId)) stage.releasePointerCapture(event.pointerId);
+  }
 
   /** Each completed operation is immutable, immediately saved, and independently reversible. */
   function commit(next: readonly Annotation[]) {
@@ -88,6 +184,7 @@
 
   /** Double-clicking an existing caption enters the same in-place editor used after placement. */
   function editCaption(event: MouseEvent) {
+    if (spaceHeld || panGesture) return;
     const element = (event.target as Element).closest('[data-annotation]');
     if (outputBusy || editingText) return;
     const index = element ? Number(element.getAttribute('data-annotation')) : selected;
@@ -100,7 +197,7 @@
   function point(event: PointerEvent) { return imagePoint(event.clientX, event.clientY, surface.getBoundingClientRect(), imageWidth, imageHeight); }
   /** Begin a captured gesture or create a keyboard-editable text object at the chosen image pixel. */
   function start(event: PointerEvent) {
-    if (outputBusy || event.button !== 0 || !imageWidth || gesture || (event.target as Element).closest('textarea')) return;
+    if (outputBusy || spaceHeld || panGesture || event.button !== 0 || !imageWidth || gesture || (event.target as Element).closest('textarea')) return;
     const target = (event.target as Element).closest('[data-annotation]');
     if (target && annotations[Number(target.getAttribute('data-annotation'))]?.kind === 'caption') return;
     editingCaption = false;
@@ -159,13 +256,13 @@
     event.stopPropagation();
     if (outputBusy) { if (event.key !== 'Tab') event.preventDefault(); return; }
     if (editingCaption && event.target === captionInput && event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
-      event.preventDefault(); editingCaption = false; surface.focus(); return;
+      event.preventDefault(); editingCaption = false; surface?.focus(); return;
     }
     if (editingCaption && event.key === 'Escape' && !event.isComposing) {
-      event.preventDefault(); editingCaption = false; surface.focus(); return;
+      event.preventDefault(); editingCaption = false; surface?.focus(); return;
     }
     if (editingText && event.target === textInput && event.key === 'Escape' && !event.isComposing) {
-      event.preventDefault(); editingText = false; surface.focus(); return;
+      event.preventDefault(); editingText = false; surface?.focus(); return;
     }
     if (!editingText && event.target === surface && event.key === 'Enter' && annotations[selected]?.kind === 'caption') {
       event.preventDefault(); void openCaption(); return;
@@ -174,13 +271,22 @@
       event.preventDefault(); void beginTextEditing(); return;
     }
     const editing = event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement;
+    if ((event.code === 'Space' || event.key === ' ') && !editing && !event.isComposing && !(event.target instanceof HTMLButtonElement)) {
+      event.preventDefault();
+      spaceHeld = true;
+      return;
+    }
     const action = annotationKey(event, editing);
     if (!action) return;
     // Tab remains native in the toolbar and text field; the canvas cycles annotation selection.
     if (action === 'cycle' && event.target !== surface) return;
     event.preventDefault();
-    if (action === 'exit') { gesture = undefined; onclose(); }
+    if (action === 'exit') { gesture = undefined; panGesture = undefined; onclose(); }
     else if (action === 'undo' || action === 'redo') history(action === 'redo');
+    else if (action === 'zoom-in') zoomBy(1);
+    else if (action === 'zoom-out') zoomBy(-1);
+    else if (action === 'zoom-reset') zoomToActual();
+    else if (action === 'zoom-fit') zoomToFit(false);
     else if (tools.includes(action as Tool)) tool = action as Tool;
     else if (action === 'cycle' && annotations.length) select((selected + (event.shiftKey ? annotations.length - 1 : 1) + annotations.length) % annotations.length);
     else if (action === 'delete' && selected >= 0) { commit(annotations.filter((_, i) => i !== selected)); select(-1); }
@@ -201,7 +307,7 @@
   /** Only completed operations enter output; failure/cancellation leaves source and annotation history untouched. */
   async function output(action: 'copy' | 'export') {
     if (outputBusy || !imageWidth) return;
-    gesture = undefined; outputBusy = true; outputMessage = action === 'copy' ? 'Copying image…' : 'Exporting PNG…';
+    gesture = undefined; panGesture = undefined; outputBusy = true; outputMessage = action === 'copy' ? 'Copying image…' : 'Exporting PNG…';
     try { outputMessage = await onoutput(action, annotations, imageWidth, imageHeight); }
     catch (error) { outputMessage = `Could not ${action === 'copy' ? 'copy image' : 'export PNG'}: ${errorMessage(error)}. Your annotations remain editable; retry or choose another destination.`; }
     finally { outputBusy = false; }
@@ -225,7 +331,7 @@
     <aside class="annotation-tools" aria-label="Drawing tools">
       <h3>TOOLS</h3>
       {#each tools as item}
-        <button type="button" class="tool-button" aria-pressed={tool === item} title={`${toolNames[item]} (${toolKeys[item]})`} onclick={() => { gesture = undefined; tool = item; }}>
+        <button type="button" class="tool-button" aria-pressed={tool === item} title={`${toolNames[item]} (${toolKeys[item]})`} onclick={() => { gesture = undefined; tool = item; surface?.focus(); }}>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d={toolIcons[item]} /></svg><span>{toolNames[item]}</span><kbd>{toolKeys[item]}</kbd>
         </button>
       {/each}
@@ -235,51 +341,80 @@
     <section class="annotation-main" aria-label="Image canvas workspace">
       <div class="annotation-properties">
         <div class="color-palette" role="group" aria-label="Drawing color"><span class="property-label">Color</span>
-          {#each colors as swatch}<button type="button" class="color-swatch" style:--swatch={swatch.value} aria-label={swatch.name} title={swatch.name} aria-pressed={color === swatch.value} onclick={() => { color = swatch.value; }}></button>{/each}
+          {#each colors as swatch}<button type="button" class="color-swatch" style:--swatch={swatch.value} aria-label={swatch.name} title={swatch.name} aria-pressed={color === swatch.value} onclick={() => { color = swatch.value; surface?.focus(); }}></button>{/each}
         </div>
         <label class="width-control">Stroke <select aria-label="Stroke width" bind:value={width}>{#each [2, 4, 8, 12] as value}<option {value}>{value} px</option>{/each}</select></label>
-        <div class="annotation-history"><button type="button" title="Undo (Ctrl/Cmd+Z)" onclick={() => history()}>↶ Undo</button><button type="button" title="Redo" onclick={() => history(true)}>↷ Redo</button></div>
+        <div class="annotation-right-controls">
+          <div class="zoom-controls" role="group" aria-label="Canvas zoom">
+            <button type="button" aria-label="Zoom out" title="Zoom out (-)" disabled={!imageWidth || viewport.zoom <= MIN_ZOOM} onclick={() => { zoomBy(-1); surface?.focus(); }}>−</button>
+            <button type="button" class="zoom-readout" aria-label="Reset zoom to 100%" title="Reset zoom to 100% (Ctrl/Cmd+0)" disabled={!imageWidth} onclick={() => { zoomToActual(); surface?.focus(); }}>{imageWidth ? `${Math.round(viewport.zoom * 100)}%` : '100%'}</button>
+            <button type="button" aria-label="Zoom in" title="Zoom in (+)" disabled={!imageWidth || viewport.zoom >= MAX_ZOOM} onclick={() => { zoomBy(1); surface?.focus(); }}>+</button>
+            <button type="button" aria-label="Zoom to fit" title="Zoom to fit (Shift+1)" disabled={!imageWidth} onclick={() => { zoomToFit(false); surface?.focus(); }}>Fit</button>
+          </div>
+          <div class="annotation-history"><button type="button" title="Undo (Ctrl/Cmd+Z)" onclick={() => { history(); surface?.focus(); }}>↶ Undo</button><button type="button" title="Redo (Ctrl/Cmd+Shift+Z)" onclick={() => { history(true); surface?.focus(); }}>↷ Redo</button></div>
+        </div>
       </div>
       {#if outputMessage}<p class="annotation-message" role="status">{outputMessage}</p>{/if}
       {#if validation}<p class="annotation-message" role="alert">{validation}</p>{/if}
-      <div class="annotation-stage">
-        <div class="annotation-image">
-      <img src={url || undefined} alt="Original screenshot for annotation" draggable="false" class="annotation-original"
-        onload={event => { const image = event.currentTarget as HTMLImageElement; imageWidth = image.naturalWidth; imageHeight = image.naturalHeight; }} />
-      {#if imageWidth}
-        <!-- The application canvas implements selection, movement, and deletion through its keyboard handler. -->
-        <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-        <svg bind:this={surface} viewBox={`0 0 ${imageWidth} ${imageHeight}`} class="absolute inset-0 h-full w-full touch-none" tabindex="0" role="application" aria-label="Annotation canvas"
-          ondblclick={editCaption} onpointerdown={start} onpointermove={move} onpointerup={finish} onpointercancel={() => { gesture = undefined; }} onlostpointercapture={() => { gesture = undefined; }}>
-          {@html annotationSvg(preview, selected, editingText ? selected : editingCaption ? captionIndex : -1, imageWidth, imageHeight)}
-          {#if editingText && annotations[selected]?.kind === 'text'}
-            {@const caption = annotations[selected] as Extract<Annotation, { kind: 'text' }>}
-            {@const bounds = annotationBounds(caption)}
-            <foreignObject x={caption.x} y={caption.y} width={Math.max(1, imageWidth - caption.x)} height={Math.max(1, imageHeight - caption.y)} style="overflow:visible;pointer-events:none">
-              <div class="caption-editor" style:font-size={`${caption.fontSize}px`}>
-                <span class="caption-measure" aria-hidden="true">{textDraft || 'Type text…'}</span>
-              <textarea bind:this={textInput} class="inline-caption" aria-label="Edit caption on image" placeholder="Type text…" wrap="off"
-                style:color={caption.color} style:font-size={`${caption.fontSize}px`}
-                style:height={`${Math.max(caption.fontSize * 1.2 + 8, bounds.bottom - bounds.top + 8)}px`}
-                bind:value={textDraft} oninput={editText} onblur={() => { editingText = false; }}></textarea>
-              </div>
-            </foreignObject>
-          {/if}
-        </svg>
-      {/if}
-          {#if editingCaption}
-            <div class="image-caption-overlay">
-              <div class="image-caption-field">
-                <span aria-hidden="true">{captionDraft || 'Add a caption…'}{'\n'}</span>
-                <textarea bind:this={captionInput} aria-label="Image caption" placeholder="Add a caption…" rows="1" bind:value={captionDraft} oninput={saveCaption} onblur={() => { editingCaption = false; }}></textarea>
-              </div>
-            </div>
+      <!-- Viewport pointer gestures complement the keyboard zoom/pan shortcuts handled on the dialog. -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div bind:this={stage} class="annotation-stage" class:can-pan={spaceHeld && !panGesture} class:is-panning={!!panGesture}
+        style:background-position={`${viewport.x}px ${viewport.y}px`}
+        onmousedown={event => { if (event.button === 1) event.preventDefault(); }}
+        onpointerdowncapture={startPanCapture} onpointerdown={startStage} onpointermove={moveStage} onpointerup={finishStage}
+        onpointercancel={() => { panGesture = undefined; }} onlostpointercapture={() => { panGesture = undefined; }}>
+        <div class="annotation-image" class:is-ready={imageWidth > 0}
+          style:width={imageWidth ? `${imageWidth * viewport.zoom}px` : undefined}
+          style:height={imageHeight ? `${imageHeight * viewport.zoom}px` : undefined}
+          style:transform={imageWidth ? `translate(${viewport.x}px, ${viewport.y}px)` : undefined}>
+          <img src={url || undefined} alt="Original screenshot for annotation" draggable="false" class="annotation-original"
+            class:pixelated={viewport.zoom >= 3}
+            onload={event => {
+              const image = event.currentTarget as HTMLImageElement;
+              imageWidth = image.naturalWidth; imageHeight = image.naturalHeight;
+              if (stage) { stageWidth = stage.clientWidth; stageHeight = stage.clientHeight; }
+              viewport = fitViewport(stageWidth, stageHeight, imageWidth, imageHeight, true);
+              fitted = true;
+              void tick().then(() => { if (document.activeElement === dialog) surface?.focus(); });
+            }} />
+          {#if imageWidth}
+            <!-- The application canvas implements selection, movement, and deletion through its keyboard handler. -->
+            <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+            <svg bind:this={surface} viewBox={`0 0 ${imageWidth} ${imageHeight}`}
+              class="annotation-surface absolute inset-0 h-full w-full touch-none"
+              style:cursor={tool === 'text' ? 'text' : tool === 'select' ? 'default' : 'crosshair'}
+              tabindex="0" role="application" aria-label="Annotation canvas"
+              ondblclick={editCaption} onpointerdown={start} onpointermove={move} onpointerup={finish} onpointercancel={() => { gesture = undefined; }} onlostpointercapture={() => { gesture = undefined; }}>
+              {@html annotationSvg(preview, selected, editingText ? selected : editingCaption ? captionIndex : -1, imageWidth, imageHeight, viewport.zoom)}
+              {#if editingText && annotations[selected]?.kind === 'text'}
+                {@const caption = annotations[selected] as Extract<Annotation, { kind: 'text' }>}
+                {@const bounds = annotationBounds(caption)}
+                <foreignObject x={caption.x} y={caption.y} width={Math.max(1, imageWidth - caption.x)} height={Math.max(1, imageHeight - caption.y)} style="overflow:visible;pointer-events:none">
+                  <div class="caption-editor" style:font-size={`${caption.fontSize}px`}>
+                    <span class="caption-measure" aria-hidden="true">{textDraft || 'Type text…'}</span>
+                  <textarea bind:this={textInput} class="inline-caption" aria-label="Edit caption on image" placeholder="Type text…" wrap="off"
+                    style:color={caption.color} style:font-size={`${caption.fontSize}px`}
+                    style:border-width={`${1 / viewport.zoom}px`}
+                    style:height={`${Math.max(caption.fontSize * 1.2 + 8, bounds.bottom - bounds.top + 8)}px`}
+                    bind:value={textDraft} oninput={editText} onblur={() => { editingText = false; }}></textarea>
+                  </div>
+                </foreignObject>
+              {/if}
+            </svg>
           {/if}
         </div>
+        {#if editingCaption}
+          <div class="image-caption-overlay">
+            <div class="image-caption-field">
+              <span aria-hidden="true">{captionDraft || 'Add a caption…'}{'\n'}</span>
+              <textarea bind:this={captionInput} aria-label="Image caption" placeholder="Add a caption…" rows="1" bind:value={captionDraft} oninput={saveCaption} onblur={() => { editingCaption = false; }}></textarea>
+            </div>
+          </div>
+        {/if}
       </div>
     </section>
   </div>
-  <footer class="annotation-footer"><span role="status">{status}</span><span>{imageWidth ? `${imageWidth} × ${imageHeight}` : 'Loading image…'}</span></footer>
+  <footer class="annotation-footer"><span role="status">{status}</span><span class="annotation-hint">Ctrl+Scroll zoom · Space+Drag pan</span><span>{imageWidth ? `${imageWidth} × ${imageHeight}` : 'Loading image…'}</span></footer>
   </fieldset>
 </dialog>
 
@@ -424,9 +559,17 @@
   }
   .image-caption-overlay {
     position: absolute;
-    inset: auto 0 0;
-    padding: 24px 16px 12px;
-    background: linear-gradient(transparent, rgba(10, 11, 14, 0.95));
+    left: 50%;
+    bottom: 16px;
+    transform: translateX(-50%);
+    width: min(640px, calc(100% - 32px));
+    padding: 10px 14px;
+    border-radius: 8px;
+    border: 1px solid rgba(99, 102, 241, 0.45);
+    background: rgba(14, 15, 20, 0.94);
+    backdrop-filter: blur(8px);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.65);
+    z-index: 2;
   }
   .image-caption-field {
     position: relative;
@@ -463,6 +606,7 @@
     font: inherit;
     text-align: inherit;
     overflow-wrap: anywhere;
+    user-select: text;
   }
   .image-caption-field textarea:focus-visible {
     box-shadow: inset 0 -1px 0 #6366f1;
@@ -532,22 +676,38 @@
     border-color: #282a35;
     color: #d1d5db;
   }
+  .annotation-right-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+  }
+  .zoom-controls,
   .annotation-history {
     display: flex;
+    align-items: center;
     gap: 4px;
-    margin-left: auto;
     font-size: 12px;
   }
+  .zoom-controls button,
   .annotation-history button {
     padding: 3px 8px;
     font-size: 11px;
+    border-radius: 4px;
     background: #1c1d25;
     border: 1px solid #282a35;
     color: #9ca3af;
   }
+  .zoom-controls button:hover:not(:disabled),
   .annotation-history button:hover:not(:disabled) {
     background: #252631;
     color: #fff;
+  }
+  .zoom-controls .zoom-readout {
+    min-width: 50px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    color: #d1d5db;
   }
   .caption-editor {
     position: relative;
@@ -582,6 +742,7 @@
     resize: none;
     overflow: auto;
     pointer-events: auto;
+    user-select: text;
   }
   .annotation-message {
     margin: 0;
@@ -593,30 +754,53 @@
     overflow-wrap: anywhere;
   }
   .annotation-stage {
+    position: relative;
     flex: 1;
     min-height: 0;
-    overflow: auto;
-    padding: 32px;
+    overflow: clip;
+    touch-action: none;
+    user-select: none;
     background-color: #0c0d10;
-    background-image: radial-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+    background-image: radial-gradient(rgba(255, 255, 255, 0.06) 1px, transparent 1px);
     background-size: 20px 20px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+  }
+  .annotation-stage.can-pan,
+  .annotation-stage.can-pan :global(*) {
+    cursor: grab !important;
+  }
+  .annotation-stage.is-panning,
+  .annotation-stage.is-panning :global(*) {
+    cursor: grabbing !important;
   }
   .annotation-image {
-    position: relative;
-    width: fit-content;
-    max-width: 100%;
-    margin-inline: auto;
-    border-radius: 6px;
+    position: absolute;
+    top: 0;
+    left: 0;
+    transform-origin: 0 0;
+    border-radius: 4px;
     overflow: hidden;
     box-shadow: 0 12px 40px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.08);
+    opacity: 0;
+    pointer-events: none;
+    will-change: transform, width, height;
+  }
+  .annotation-image.is-ready {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .annotation-surface:focus {
+    outline: none;
   }
   .annotation-original {
     display: block;
-    max-width: 100%;
-    max-height: 68vh;
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    max-height: none;
+    user-select: none;
+  }
+  .annotation-original.pixelated {
+    image-rendering: pixelated;
   }
   .annotation-footer {
     display: flex;
@@ -628,6 +812,9 @@
     color: #6b7280;
     font-size: 11px;
   }
+  .annotation-hint {
+    opacity: 0.75;
+  }
   .annotation-footer > :last-child {
     margin-left: auto;
   }
@@ -637,6 +824,6 @@
     .tool-button { gap: 6px; }
     .tool-button kbd { display: none; }
     .annotation-properties { padding: 10px; gap: 12px; }
-    .annotation-stage { padding: 16px; }
+    .annotation-hint { display: none; }
   }
 </style>

@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { undo, redo } from '@codemirror/commands';
-import { AnnotationHistory, annotationKey, annotationSvg, imagePoint, translate, annotationBounds, resizeAnnotation } from './annotations';
+import { AnnotationHistory, MIN_ZOOM, MAX_ZOOM, annotationKey, annotationSvg, imagePoint, translate, annotationBounds, resizeAnnotation, clampViewport, fitViewport, zoomAtPoint, resetViewport, stepZoom, applyWheel } from './annotations';
 import { annotateImage, createNoteState, imageField } from './state';
 import { decodeDocument, encodeDocument, type Annotation, type ImageBlock } from './document';
 
@@ -146,4 +146,66 @@ test('image captions render at the bottom, escape content, and stay fixed during
   expect(annotationSvg([caption], 0, 0, 800, 600)).toBe('');
   expect(translate(caption, 10, 20, 800, 600)).toEqual(caption);
   expect(resizeAnnotation(caption, { x: 10, y: 20 }, 800, 600)).toEqual(caption);
+});
+
+test('Figma-style cursor-centered zoom keeps the pixel under the cursor fixed across scales', () => {
+  const stageW = 1200, stageH = 800, imgW = 1600, imgH = 1000;
+  const initial = fitViewport(stageW, stageH, imgW, imgH, true);
+  expect(initial.zoom).toBeLessThan(1);
+  // Pick a cursor point inside the fitted image and verify its mapped image coordinate stays invariant across zoom in/out.
+  const cursorX = 480, cursorY = 320;
+  const before = imagePoint(cursorX, cursorY, { left: initial.x, top: initial.y, width: imgW * initial.zoom, height: imgH * initial.zoom }, imgW, imgH);
+  const zoomedIn = zoomAtPoint(initial, 3.5, cursorX, cursorY, stageW, stageH, imgW, imgH);
+  const afterIn = imagePoint(cursorX, cursorY, { left: zoomedIn.x, top: zoomedIn.y, width: imgW * zoomedIn.zoom, height: imgH * zoomedIn.zoom }, imgW, imgH);
+  expect(afterIn.x).toBeCloseTo(before.x, 6);
+  expect(afterIn.y).toBeCloseTo(before.y, 6);
+  const zoomedOut = zoomAtPoint(zoomedIn, 0.4, cursorX, cursorY, stageW, stageH, imgW, imgH);
+  const afterOut = imagePoint(cursorX, cursorY, { left: zoomedOut.x, top: zoomedOut.y, width: imgW * zoomedOut.zoom, height: imgH * zoomedOut.zoom }, imgW, imgH);
+  expect(afterOut.x).toBeCloseTo(before.x, 6);
+  expect(afterOut.y).toBeCloseTo(before.y, 6);
+});
+
+test('wheel zoom, trackpad pan, Shift horizontal pan, fit, reset, and bounds match Figma conventions', () => {
+  const stageW = 1000, stageH = 700, imgW = 800, imgH = 500;
+  const start = fitViewport(stageW, stageH, imgW, imgH, true);
+  expect(start).toEqual({ zoom: 1, x: 100, y: 100 });
+  // Explicit Zoom-to-Fit scales small images up to fill available stage space.
+  const fitted = fitViewport(stageW, stageH, 200, 100, false);
+  expect(fitted.zoom).toBeGreaterThan(1);
+  // Ctrl+wheel / trackpad pinch zooms around the cursor.
+  const pinched = applyWheel(start, { deltaX: 0, deltaY: -120, deltaMode: 0, ctrlKey: true, metaKey: false, shiftKey: false }, 500, 350, stageW, stageH, imgW, imgH);
+  expect(pinched.zoom).toBeGreaterThan(1.2);
+  expect(pinched.zoom).toBeLessThan(1.35);
+  // Plain wheel pans; Shift+vertical wheel pans horizontally.
+  const pannedY = applyWheel(pinched, { deltaX: 0, deltaY: 40, deltaMode: 0, ctrlKey: false, metaKey: false, shiftKey: false }, 500, 350, stageW, stageH, imgW, imgH);
+  expect(pannedY.y).toBeCloseTo(pinched.y - 40, 5);
+  const pannedX = applyWheel(pinched, { deltaX: 0, deltaY: 40, deltaMode: 0, ctrlKey: false, metaKey: false, shiftKey: true }, 500, 350, stageW, stageH, imgW, imgH);
+  expect(pannedX.x).toBeCloseTo(pinched.x - 40, 5);
+  expect(pannedX.y).toBeCloseTo(pinched.y, 5);
+  // Clamping prevents flinging the image completely out of the stage.
+  const clamped = clampViewport({ zoom: 1000, x: -999999, y: 999999 }, stageW, stageH, imgW, imgH);
+  expect(clamped.zoom).toBe(MAX_ZOOM);
+  expect(clamped.x + imgW * clamped.zoom).toBeGreaterThan(0);
+  expect(clamped.y).toBeLessThan(stageH);
+  expect(clampViewport({ zoom: 0.0001, x: 0, y: 0 }, stageW, stageH, imgW, imgH).zoom).toBe(MIN_ZOOM);
+  // Step zoom snaps cleanly back to 100% and resetViewport centers smaller images.
+  expect(stepZoom(stepZoom(1, 1), -1)).toBe(1);
+  expect(resetViewport(pannedX, stageW, stageH, imgW, imgH)).toEqual({ zoom: 1, x: 100, y: 100 });
+});
+
+test('zoom shortcuts and constant screen-size selection handles', () => {
+  const base = { key: '=', ctrlKey: false, metaKey: false, shiftKey: false, isComposing: false };
+  expect(annotationKey(base, false)).toBe('zoom-in');
+  expect(annotationKey({ ...base, key: '+', ctrlKey: true, shiftKey: true }, false)).toBe('zoom-in');
+  expect(annotationKey({ ...base, key: '-' }, false)).toBe('zoom-out');
+  expect(annotationKey({ ...base, key: '-', metaKey: true }, false)).toBe('zoom-out');
+  expect(annotationKey({ ...base, key: '0', ctrlKey: true }, false)).toBe('zoom-reset');
+  expect(annotationKey({ ...base, key: ')', shiftKey: true }, false)).toBe('zoom-reset');
+  expect(annotationKey({ ...base, key: '!', shiftKey: true }, false)).toBe('zoom-fit');
+  expect(annotationKey({ ...base, key: '1', ctrlKey: true }, false)).toBe('zoom-fit');
+  expect(annotationKey({ ...base, key: '+' }, true)).toBeUndefined();
+  expect(annotationKey({ ...base, key: '+', ctrlKey: true }, true)).toBeUndefined();
+  // Resize handle scales inversely with zoom so it stays 10 CSS pixels on screen.
+  expect(annotationSvg([text], 0, -1, 800, 600, 4)).toContain('width="2.5" height="2.5"');
+  expect(annotationSvg([text], 0, -1, 800, 600, 0.25)).toContain('width="40" height="40"');
 });
