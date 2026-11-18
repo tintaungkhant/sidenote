@@ -41,12 +41,12 @@ export function automaticTitle(document: NoteDocument): string {
   return 'Untitled';
 }
 /** Decode app shortcuts without swallowing composition, Alt combinations, or unrelated native keys. */
-export function tabShortcut(event: Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'metaKey' | 'altKey' | 'shiftKey' | 'isComposing'>): 'new' | 'close' | 'reopen' | 'next' | 'previous' | 'sidebar' | 'explorer' | 'search' | 'wrap' | 'quit' | undefined {
+export function tabShortcut(event: Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'metaKey' | 'altKey' | 'shiftKey' | 'isComposing'>): 'new' | 'close' | 'reopen' | 'next' | 'previous' | 'sidebar' | 'explorer' | 'search' | 'git' | 'wrap' | 'quit' | undefined {
   if (event.isComposing) return;
   const key = event.key.toLowerCase();
   if (event.altKey) return !event.ctrlKey && !event.metaKey && !event.shiftKey && key === 'z' ? 'wrap' : undefined;
   if (event.ctrlKey && !event.metaKey && key === 'tab') return event.shiftKey ? 'previous' : 'next';
   if (!(event.ctrlKey || event.metaKey)) return;
-  if (event.shiftKey) return ({ t: 'reopen', e: 'explorer', f: 'search' } as const)[key as 't'];
+  if (event.shiftKey) return ({ t: 'reopen', e: 'explorer', f: 'search', g: 'git' } as const)[key as 't'];
   return ({ n: 'new', w: 'close', b: 'sidebar', q: 'quit' } as const)[key as 'n'];
 }

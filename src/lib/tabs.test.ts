@@ -73,10 +73,11 @@ test('immediate exit after pin and reorder saves exact session', async () => {
 });
 
 
-test('VS Code workspace shortcuts open Explorer, Search, and toggle wrap', () => {
+test('VS Code workspace shortcuts open Explorer, Search, Source Control, and toggle wrap', () => {
   const key = { key: 'e', ctrlKey: true, metaKey: false, altKey: false, shiftKey: true, isComposing: false };
   expect(tabShortcut(key)).toBe('explorer');
   expect(tabShortcut({ ...key, key: 'f' })).toBe('search');
+  expect(tabShortcut({ ...key, key: 'g' })).toBe('git');
   expect(tabShortcut({ ...key, key: 'b', shiftKey: false })).toBe('sidebar');
   expect(tabShortcut({ ...key, key: 'z', ctrlKey: false, shiftKey: false, altKey: true })).toBe('wrap');
   expect(tabShortcut({ ...key, isComposing: true })).toBeUndefined();

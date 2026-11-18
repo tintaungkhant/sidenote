@@ -88,10 +88,10 @@ fn read(path: &Path, limit: u64) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
-fn text(path: &Path) -> Result<String> {
+pub(crate) fn text(path: &Path) -> Result<String> {
     String::from_utf8(read(path, MAX_TEXT)?).map_err(fail)
 }
-fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut tmp =
         tempfile::NamedTempFile::new_in(path.parent().ok_or_else(|| fail("No parent directory"))?)
             .map_err(fail)?;
@@ -177,7 +177,7 @@ fn strip_numeric_suffix(stem: &str) -> &str {
     stem
 }
 /// Unlike rename-with-replace, Windows ReplaceFile refuses to resurrect a deleted destination.
-fn replace_existing(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn replace_existing(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut tmp = tempfile::NamedTempFile::new_in(path.parent().unwrap()).map_err(fail)?;
     tmp.write_all(bytes).map_err(fail)?;
     tmp.as_file().sync_all().map_err(fail)?;
@@ -242,12 +242,12 @@ fn companion(path: &Path) -> Result<PathBuf> {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct DiskDocument {
-    path: String,
-    text: String,
-    metadata: Value,
-    revision: String,
+    pub(crate) path: String,
+    pub(crate) text: String,
+    pub(crate) metadata: Value,
+    pub(crate) revision: String,
 }
-fn load(path: &Path) -> Result<DiskDocument> {
+pub(crate) fn load(path: &Path) -> Result<DiskDocument> {
     // Read first so callers can distinguish deletion from permissions and malformed sidecars.
     let source = text(path)?;
     let path = fs::canonicalize(path).map_err(fail)?;
@@ -503,7 +503,7 @@ impl FileStore {
         fs::rename(stage.path(), &folder).map_err(fail)?;
         load(&folder.join(name))
     }
-    fn create_in_root(
+    pub(crate) fn create_in_root(
         &self,
         root: &Path,
         preferred: Option<&str>,
@@ -621,7 +621,7 @@ impl FileStore {
         fs::rename(stage.path(), &folder).map_err(fail)?;
         load(&folder.join(&file_name))
     }
-    fn rename(&self, root: &Path, path: &Path, name: &str) -> Result<DiskDocument> {
+    pub(crate) fn rename(&self, root: &Path, path: &Path, name: &str) -> Result<DiskDocument> {
         let root = fs::canonicalize(root).map_err(fail)?;
         if !root.is_dir() {
             return Err(fail("Root path is not a folder"));
@@ -889,7 +889,7 @@ impl FileStore {
             if !parent.starts_with(&root) || parent == root {
                 return Err(fail("Note folder is outside the workspace root"));
             }
-            fs::remove_dir_all(parent).map_err(fail)?;
+            remove_dir_all_force(parent)?;
         } else {
             let sidecar = companion(&current)?;
             fs::remove_file(&current).map_err(fail)?;
@@ -993,7 +993,7 @@ pub enum Operation {
         query: String,
     },
 }
-fn package_main(dir: &Path) -> Option<String> {
+pub(crate) fn package_main(dir: &Path) -> Option<String> {
     let pkg = dir.join(".simple-note.json");
     if !fs::symlink_metadata(&pkg)
         .map(|m| m.is_file())
@@ -1064,7 +1064,7 @@ fn is_pure_note_package(dir: &Path, main_name: &str) -> bool {
             return false;
         };
         if kind.is_dir() {
-            if name_str != "assets" {
+            if !matches!(name_str, "assets" | ".git") {
                 return false;
             }
         } else if kind.is_file()
@@ -1077,7 +1077,32 @@ fn is_pure_note_package(dir: &Path, main_name: &str) -> bool {
     }
     true
 }
-fn clean_os_path(path: &Path) -> PathBuf {
+#[allow(clippy::permissions_set_readonly_false)]
+pub(crate) fn remove_dir_all_force(dir: &Path) -> Result<()> {
+    fn clear_readonly(path: &Path) {
+        let Ok(meta) = fs::symlink_metadata(path) else {
+            return;
+        };
+        if meta.file_type().is_symlink() {
+            return;
+        }
+        let mut perms = meta.permissions();
+        if perms.readonly() {
+            perms.set_readonly(false);
+            let _ = fs::set_permissions(path, perms);
+        }
+        if meta.is_dir()
+            && let Ok(entries) = fs::read_dir(path)
+        {
+            for entry in entries.flatten() {
+                clear_readonly(&entry.path());
+            }
+        }
+    }
+    clear_readonly(dir);
+    fs::remove_dir_all(dir).map_err(fail)
+}
+pub(crate) fn clean_os_path(path: &Path) -> PathBuf {
     let raw = path.to_string_lossy();
     if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
         PathBuf::from(format!(r"\\{unc}"))
@@ -1871,6 +1896,13 @@ mod tests {
             )
             .unwrap();
         assert!(root.join("note-a/assets/a.png").exists());
+        let pack_dir = root.join("note-a/.git/objects/pack");
+        fs::create_dir_all(&pack_dir).unwrap();
+        let pack_file = pack_dir.join("pack-test.idx");
+        fs::write(&pack_file, b"pack").unwrap();
+        let mut perms = fs::metadata(&pack_file).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&pack_file, perms).unwrap();
         store.delete(&root, Path::new(&doc.path)).unwrap();
         assert!(!root.join("note-a").exists());
 

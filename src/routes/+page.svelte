@@ -23,6 +23,7 @@
   import { tabShortcut } from '$lib/tabs';
   import * as storage from '$lib/storage';
   import * as files from '$lib/files';
+  import * as vcs from '$lib/vcs';
 
   let workspace = $state.raw<files.Workspace>({ version: 1, buffers: [], active: null, root: null, wrap: true, sidebar: false });
   let active = $derived(workspace.buffers.find(b => b.id === workspace.active));
@@ -34,13 +35,17 @@
   const wrapSlot = new Compartment();
   const editable = new Compartment();
   let loading = $state(true), busy = $state(false), frozen = $state(false), startupError = $state(''), notice = $state(''), recoveryError = $state('');
-  let panel = $state<'explorer' | 'search'>('explorer'), query = $state(''), findQuery = $state(''), findVisible = $state(false);
+  let panel = $state<'explorer' | 'search' | 'git'>('explorer'), query = $state(''), findQuery = $state(''), findVisible = $state(false);
   let explorerEntries = $state.raw<files.Entry[]>([]);
   let searchEntries = $state.raw<files.Entry[]>([]);
   let searchMatches = $derived(files.searchWorkspace(query, workspace.buffers, searchEntries, workspace.root));
   let searchGroups = $derived(files.groupSearchMatches(searchMatches));
   let collapsedGroups = $state.raw<Record<string, boolean>>({});
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
+  let gitAvailable = $state<boolean | null>(null);
+  let gitBannerDismissed = $state(false);
+  let vcsState = $state.raw<vcs.VcsStatus | null>(null);
+  let sidebarCommitMsg = $state('Update note');
   let renamingTarget = $state<{ kind: 'buffer'; id: string } | { kind: 'path'; path: string } | null>(null), renameValue = $state('');
   let renameInitial = '', renameSubmitting = false;
   let closeTarget = $state<string | null>(null);
@@ -51,6 +56,24 @@
   let saveName = $state('');
   let saveError = $state('');
   let saveDialog: HTMLDialogElement;
+  let commitTargetId = $state<string | null>(null);
+  let commitMessage = $state('');
+  let commitError = $state('');
+  let commitDialog: HTMLDialogElement;
+  let restoreTarget = $state<{ id: string; path: string; hash: string; shortHash: string } | null>(null);
+  let restoreDialog: HTMLDialogElement;
+  let diffView = $state.raw<{
+    bufferId: string;
+    path: string;
+    label: string;
+    hash: string | null;
+    subject: string;
+    mode: 'parent' | 'working';
+    isInitial: boolean;
+    summary: vcs.DiffSummary;
+    metaChanged: boolean;
+    assetsChanged: boolean;
+  } | null>(null);
   let annotation = $state.raw<{ block: ImageBlock; blob: Blob } | undefined>();
   let closed: files.Buffer[] = [];
   let snapshotQueue: Promise<void> = Promise.resolve();
@@ -100,8 +123,10 @@
   function mount(id: string | null) {
     if (id === viewId) return;
     unmount();
+    if (diffView && diffView.bufferId !== id) diffView = null;
     workspace = { ...workspace, active: id };
     const buffer = workspace.buffers.find(b => b.id === id);
+    if (workspace.sidebar && panel === 'git') void refreshVcs(buffer);
     if (!buffer) return;
     const language = files.bufferLanguage(buffer);
     viewId = buffer.id;
@@ -414,6 +439,207 @@
     });
     void action.then(() => { if (savePrompt) void focusSaveInput(); });
   }
+  async function refreshVcs(target = active) {
+    if (!target?.path || !workspace.root || !files.withinRoot(target.path, workspace.root) || target.external === 'deleted') {
+      vcsState = null;
+      return;
+    }
+    try {
+      const next = await vcs.vcsStatus(workspace.root, target.path);
+      if (active?.id !== target.id && (!active?.path || !files.samePath(active.path, target.path))) return;
+      gitAvailable = next.available;
+      if (!next.available) gitBannerDismissed = false;
+      vcsState = next;
+      if (!sidebarCommitMsg || sidebarCommitMsg === 'Initial commit' || sidebarCommitMsg === 'Update note') {
+        sidebarCommitMsg = vcs.defaultCommitMessage(Boolean(next.initialized));
+      }
+    } catch (error) {
+      notice = errorMessage(error);
+    }
+  }
+  async function focusCommitInput() {
+    await tick();
+    const input = document.getElementById('commit-message-input') as HTMLInputElement | null;
+    if (!input) return;
+    input.focus();
+    input.select();
+  }
+  async function beginCommit(id = workspace.active) {
+    if (!id || busy || frozen) return;
+    capture();
+    const buffer = workspace.buffers.find(b => b.id === id);
+    if (!buffer) return;
+    const check = await vcs.checkGit();
+    gitAvailable = check.available;
+    if (!check.available) {
+      gitBannerDismissed = false;
+      throw new Error('Git is not installed. Please install Git (https://git-scm.com) first.');
+    }
+    if (!workspace.root || files.isUnsavedBuffer(buffer, workspace.root)) {
+      notice = 'Save this note in the root folder before committing.';
+      await saveFile(buffer.id);
+      return;
+    }
+    const status = await vcs.vcsStatus(workspace.root, buffer.path!);
+    if (!status.available) {
+      gitAvailable = false;
+      gitBannerDismissed = false;
+      throw new Error('Git is not installed. Please install Git (https://git-scm.com) first.');
+    }
+    if (!status.supported) throw new Error('Version control is available for saved note folders in the root.');
+    if (active && active.id === buffer.id) vcsState = status;
+    if (status.initialized && !status.dirty && !files.modified(buffer)) {
+      notice = 'No changes to commit.';
+      return;
+    }
+    commitTargetId = buffer.id;
+    commitMessage = vcs.defaultCommitMessage(status.initialized);
+    commitError = '';
+    commitDialog.showModal();
+    await focusCommitInput();
+  }
+  async function beginCommitPath(path: string) {
+    const open = workspace.buffers.find(b => b.path && files.samePath(b.path, path));
+    if (open) { await beginCommit(open.id); return; }
+    await openRootFile(path);
+    const opened = workspace.buffers.find(b => b.path && files.samePath(b.path, path));
+    if (opened) await beginCommit(opened.id);
+  }
+  function cancelCommitDialog() {
+    if (busy) return;
+    commitDialog.close();
+    commitTargetId = null;
+    commitError = '';
+    view?.focus();
+  }
+  function confirmCommitDialog() {
+    if (!commitTargetId || busy || frozen) return;
+    const targetId = commitTargetId;
+    run(async () => {
+      try {
+        capture();
+        const current = workspace.buffers.find(b => b.id === targetId);
+        const rootPath = workspace.root;
+        if (!current || !rootPath || !current.path) {
+          if (commitDialog?.open) commitDialog.close();
+          commitTargetId = null;
+          commitError = '';
+          return;
+        }
+        if (files.modified(current)) await commitBufferSave(current, rootPath);
+        const latest = workspace.buffers.find(b => b.id === targetId);
+        if (!latest?.path) throw new Error('Note is not saved on disk.');
+        const nextStatus = await vcs.vcsCommit(rootPath, latest.path, commitMessage);
+        if (active && latest.id === active.id) vcsState = nextStatus;
+        if (commitDialog?.open) commitDialog.close();
+        commitTargetId = null;
+        commitError = '';
+        if (diffView && diffView.bufferId === latest.id && diffView.hash === null) diffView = null;
+        sidebarCommitMsg = 'Update note';
+        notice = `Committed: ${nextStatus.commits[0]?.subject ?? 'Saved snapshot'}`;
+        view?.focus();
+      } catch (error) {
+        commitError = errorMessage(error);
+      }
+    });
+    void action.then(() => { if (commitTargetId) void focusCommitInput(); });
+  }
+  async function commitFromSidebar() {
+    if (!active || !workspace.root || files.isUnsavedBuffer(active, workspace.root)) return;
+    capture();
+    const targetId = active.id;
+    try {
+      if (files.modified(active)) await commitBufferSave(active, workspace.root);
+      const latest = workspace.buffers.find(b => b.id === targetId);
+      if (!latest?.path || !workspace.root) return;
+      const nextStatus = await vcs.vcsCommit(workspace.root, latest.path, sidebarCommitMsg);
+      if (active?.id === latest.id) vcsState = nextStatus;
+      sidebarCommitMsg = 'Update note';
+      if (diffView && diffView.bufferId === latest.id && diffView.hash === null) diffView = null;
+      notice = `Committed: ${nextStatus.commits[0]?.subject ?? 'Saved snapshot'}`;
+    } catch (error) {
+      if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'git_missing') {
+        gitAvailable = false;
+        gitBannerDismissed = false;
+      }
+      throw error;
+    }
+  }
+  async function openDiff(hash: string | null, subject: string, mode: 'parent' | 'working' = 'parent') {
+    capture();
+    const target = active;
+    if (!target?.path || !workspace.root || !files.withinRoot(target.path, workspace.root)) return;
+    try {
+      const effectiveMode = hash === null ? 'working' : mode;
+      const payload = await vcs.vcsDiff(workspace.root, target.path, hash, effectiveMode);
+      const dirtyWorking = effectiveMode === 'working' && files.modified(target);
+      const newText = dirtyWorking ? target.text : payload.newText;
+      const hasPendingAssets = dirtyWorking && Object.keys(target.metadata.images).some(k => k.startsWith('recovery:'));
+      const metaEditedInRam = dirtyWorking && (hasPendingAssets || target.text === payload.newText);
+      diffView = {
+        bufferId: target.id,
+        path: target.path,
+        label: files.title(target),
+        hash,
+        subject,
+        mode: effectiveMode,
+        isInitial: payload.isInitial,
+        summary: vcs.diffLines(payload.oldText, newText),
+        metaChanged: payload.metaChanged || metaEditedInRam,
+        assetsChanged: payload.assetsChanged || hasPendingAssets,
+      };
+    } catch (error) {
+      if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'git_missing') {
+        gitAvailable = false;
+        gitBannerDismissed = false;
+      }
+      throw error;
+    }
+  }
+  function closeDiff() {
+    diffView = null;
+    view?.focus();
+  }
+  function promptRestore(commit: Pick<vcs.CommitEntry, 'hash' | 'shortHash'>) {
+    if (!active?.path || !workspace.root || !files.withinRoot(active.path, workspace.root)) return;
+    restoreTarget = { id: active.id, path: active.path, hash: commit.hash, shortHash: commit.shortHash };
+    restoreDialog.showModal();
+  }
+  async function confirmRestore() {
+    const target = restoreTarget;
+    if (!target || !workspace.root) { restoreDialog.close(); restoreTarget = null; return; }
+    const disk = await vcs.vcsRestore(workspace.root, target.path, target.hash);
+    restoreDialog.close();
+    restoreTarget = null;
+    if (viewId === target.id) unmount();
+    states.delete(target.id);
+    patch(target.id, { ...disk, baseline: files.fingerprint(disk.text, disk.metadata), external: null });
+    if (workspace.active === target.id) mount(target.id);
+    diffView = null;
+    await refresh();
+    await refreshVcs();
+    await checkpoint();
+    notice = `Restored ${target.shortHash}.`;
+    view?.focus();
+  }
+  function commitContext(event: MouseEvent, commit: vcs.CommitEntry) {
+    event.preventDefault();
+    event.stopPropagation();
+    const items: MenuEntry[] = [
+      { label: 'View changes', action: () => openDiff(commit.hash, `${commit.shortHash}: ${commit.subject}`, 'parent') },
+      { label: 'Compare with current', action: () => openDiff(commit.hash, `${commit.shortHash} ↔ Current`, 'working') },
+      'separator',
+      { label: 'Restore this version', action: () => promptRestore(commit) },
+      {
+        label: 'Copy commit hash',
+        action: async () => {
+          await invoke<void>('clipboard_write_text', { text: commit.hash });
+          notice = `Copied ${commit.shortHash}.`;
+        },
+      },
+    ];
+    void showContextMenu(event.clientX, event.clientY, items);
+  }
   async function ensureExplorerVisible() {
     if (!workspace.sidebar || panel !== 'explorer') {
       panel = 'explorer';
@@ -578,6 +804,7 @@
     if (!buffer) return;
     const previous = workspace;
     if (renamingTarget?.kind === 'buffer' && renamingTarget.id === id) renamingTarget = null;
+    if (diffView && diffView.bufferId === id) diffView = null;
     if (viewId === id) unmount();
     workspace = files.removeBuffer(workspace, id);
     states.delete(id);
@@ -607,9 +834,11 @@
     if (workspace.root) {
       explorerEntries = await files.operation<files.Entry[]>({ kind: 'browse', root: workspace.root, query: '' });
       searchEntries = panel === 'search' && query ? await files.operation<files.Entry[]>({ kind: 'browse', root: workspace.root, query }) : [];
+      if (workspace.sidebar && panel === 'git') await refreshVcs();
     } else {
       explorerEntries = [];
       searchEntries = [];
+      vcsState = null;
     }
   }
   function onSearchInput() {
@@ -625,11 +854,12 @@
         .catch(error => { notice = errorMessage(error); });
     }, 120);
   }
-  async function showPanel(next: 'explorer' | 'search') {
+  async function showPanel(next: 'explorer' | 'search' | 'git') {
     panel = next;
     workspace = { ...workspace, sidebar: true };
     syncEditorSearch();
     await refresh();
+    if (next === 'git') await refreshVcs();
     scheduleRecovery();
     if (next === 'search') {
       await tick();
@@ -704,7 +934,7 @@
     unmount(); states.delete(id); patch(id, { ...disk, baseline: files.fingerprint(disk.text, disk.metadata), external: null }); mount(id); await checkpoint();
   }
   async function poll() {
-    if (polling || busy || frozen || loading || annotation || renamingTarget || savePrompt || startupError) return;
+    if (polling || busy || frozen || loading || annotation || renamingTarget || savePrompt || commitTargetId || restoreTarget || startupError) return;
     polling = true;
     try {
       capture();
@@ -743,6 +973,10 @@
     frozen = true;
     if (saveDialog?.open) saveDialog.close();
     savePrompt = null;
+    if (commitDialog?.open) commitDialog.close();
+    commitTargetId = null;
+    if (restoreDialog?.open) restoreDialog.close();
+    restoreTarget = null;
     view?.contentDOM.blur();
     view?.dispatch({ effects: editable.reconfigure(EditorView.editable.of(false)) });
     exitWork = (async () => {
@@ -768,7 +1002,7 @@
   function command(work: () => Promise<void> | void) { document.querySelectorAll<HTMLElement>('.command-menu').forEach(m => m.hidePopover()); run(work); }
   async function showContextMenu(x: number, y: number, items: MenuEntry[]) {
     document.querySelectorAll<HTMLElement>('.command-menu').forEach(m => m.hidePopover());
-    if (!items.length || busy || frozen || loading || annotation || closeDialog?.open || deleteDialog?.open || saveDialog?.open) return;
+    if (!items.length || busy || frozen || loading || annotation || closeDialog?.open || deleteDialog?.open || saveDialog?.open || commitDialog?.open || restoreDialog?.open) return;
     contextItems = items;
     await tick();
     if (!contextPopover) return;
@@ -823,6 +1057,7 @@
       if (!workspace.buffers.some(b => b.id === targetId)) renamingTarget = null;
     }
     if (renamingTarget?.kind === 'path' && files.samePath(renamingTarget.path, target.path)) renamingTarget = null;
+    if (diffView && files.samePath(diffView.path, target.path)) diffView = null;
     closed = closed.filter(b => !(b.path && files.samePath(b.path, target.path)));
     mount(workspace.active);
     await refresh();
@@ -848,6 +1083,7 @@
     const inRoot = Boolean(onDisk && workspace.root && files.withinRoot(buffer.path, workspace.root));
     const items: MenuEntry[] = [
       { label: 'Save', shortcut: 'Ctrl+S', action: () => saveFile(buffer.id).then(() => {}) },
+      { label: 'Commit…', action: () => beginCommit(buffer.id) },
       ...(onDisk ? [
         { label: 'Reveal in Explorer', action: () => revealPath(buffer.path!) },
         { label: 'Copy path', action: () => copyPath(buffer.path!) },
@@ -889,6 +1125,7 @@
     const items: MenuEntry[] = [
       { label: 'Open', action: () => openRootFile(entry.path) },
       ...(openBuffer && files.modified(openBuffer) ? [{ label: 'Save', shortcut: 'Ctrl+S', action: () => saveFile(openBuffer.id).then(() => {}) }] : []),
+      { label: 'Commit…', action: () => beginCommitPath(entry.path) },
       { label: 'Rename', shortcut: 'F2', action: () => beginRenamePath(entry.path) },
       { label: 'Reveal in Explorer', action: () => revealPath(entry.path) },
       { label: 'Copy path', action: () => copyPath(entry.path) },
@@ -923,7 +1160,7 @@
   function editorContext(event: MouseEvent) {
     event.preventDefault();
     event.stopPropagation();
-    if (!active || !view) return;
+    if (!active || !view || diffView) return;
     const hasSelection = !view.state.selection.main.empty;
     const targetId = active.id;
     const items: MenuEntry[] = [
@@ -1005,14 +1242,15 @@
   }
   function onWindowContextMenu(event: MouseEvent) {
     event.preventDefault();
-    if (annotation || closeDialog?.open || deleteDialog?.open || saveDialog?.open) return;
+    if (annotation || closeDialog?.open || deleteDialog?.open || saveDialog?.open || commitDialog?.open || restoreDialog?.open) return;
     const target = event.target;
     if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
       void showContextMenu(event.clientX, event.clientY, inputMenuItems(target));
     }
   }
   function shortcut(event: KeyboardEvent) {
-    if (annotation || closeDialog?.open || deleteDialog?.open || saveDialog?.open || event.isComposing || event.altKey && event.key.toLowerCase() !== 'z') return;
+    if (annotation || closeDialog?.open || deleteDialog?.open || saveDialog?.open || commitDialog?.open || restoreDialog?.open || event.isComposing || event.altKey && event.key.toLowerCase() !== 'z') return;
+    if (event.key === 'Escape' && diffView && !findVisible && !renamingTarget) { event.preventDefault(); closeDiff(); return; }
     const key = event.key.toLowerCase();
     if ((event.ctrlKey || event.metaKey) && (key === 's' || key === 'o')) { event.preventDefault(); run(() => key === 's' ? saveFile(workspace.active,event.shiftKey).then(() => {}) : setRootFolder()); return; }
     if (event.key === 'F2' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && workspace.active && !renamingTarget && !busy && !frozen) { event.preventDefault(); run(() => beginRename(workspace.active)); return; }
@@ -1022,7 +1260,7 @@
       if (action === 'new') await newFile(); else if (action === 'close' && workspace.active) await closeFile(workspace.active);
       else if (action === 'reopen') await reopen(); else if (action === 'wrap') wrap();
       else if (action === 'sidebar') { workspace = { ...workspace, sidebar: !workspace.sidebar }; await refresh(); syncEditorSearch(); scheduleRecovery(); }
-      else if (action === 'explorer' || action === 'search') await showPanel(action);
+      else if (action === 'explorer' || action === 'search' || action === 'git') await showPanel(action);
       else if (workspace.buffers.length) { const index = workspace.buffers.findIndex(b => b.id === workspace.active); mount(workspace.buffers[(index+(action === 'previous' ? workspace.buffers.length-1 : 1))%workspace.buffers.length].id); }
     });
   }
@@ -1056,6 +1294,12 @@
       started = true;
       mount(workspace.active);
       if (!recovered) await newFile();
+      try {
+        const gitCheck = await vcs.checkGit();
+        if (!disposed) gitAvailable = gitCheck.available;
+      } catch {
+        // Ignore unexpected startup check failure; interactive VCS commands check directly.
+      }
       try { await refresh(); } catch (error) { notice = errorMessage(error); }
     })();
     void boot.catch(error => { startupError = errorMessage(error); }).finally(() => { loading = false; void poll(); });
@@ -1076,10 +1320,12 @@
     </nav>
     <div class="header-center"><button class="header-search-pill" onclick={() => run(() => showPanel('search'))}>Search <kbd>Ctrl+Shift+F</kbd></button></div>
     <button class="header-btn" disabled={!active || busy || loading || frozen} onclick={() => run(() => saveFile().then(() => {}))}>Save <kbd>Ctrl+S</kbd></button>
+    <button class="header-btn" disabled={!active || busy || loading || frozen} onclick={() => run(() => beginCommit(workspace.active))}>Commit</button>
     <div id="app-File" popover class="command-menu">
       <button onclick={() => command(newFile)}>New file <kbd>Ctrl+N</kbd></button>
       <button onclick={() => command(setRootFolder)}>{workspace.root ? 'Change root folder…' : 'Set root folder…'} <kbd>Ctrl+O</kbd></button>
       <button disabled={!active} onclick={() => command(() => saveFile().then(() => {}))}>Save <kbd>Ctrl+S</kbd></button>
+      <button disabled={!active} onclick={() => command(() => beginCommit(workspace.active))}>Commit…</button>
       <button disabled={!active} onclick={() => command(() => beginRename(workspace.active))}>Rename <kbd>F2</kbd></button>
       <div class="menu-separator"></div><button onclick={() => command(reopen)}>Reopen closed tab <kbd>Ctrl+Shift+T</kbd></button>
       <button onclick={() => { void storage.requestExit(); }}>Quit <kbd>Ctrl+Q</kbd></button>
@@ -1093,10 +1339,17 @@
     <div id="app-View" popover class="command-menu">
       <button onclick={() => command(() => showPanel('explorer'))}>Explorer <kbd>Ctrl+Shift+E</kbd></button>
       <button onclick={() => command(() => showPanel('search'))}>Search <kbd>Ctrl+Shift+F</kbd></button>
+      <button onclick={() => command(() => showPanel('git'))}>Source Control <kbd>Ctrl+Shift+G</kbd></button>
       <button onclick={() => command(() => { workspace = { ...workspace, sidebar: !workspace.sidebar }; syncEditorSearch(); scheduleRecovery(); })}>Toggle sidebar <kbd>Ctrl+B</kbd></button>
       <button onclick={() => command(wrap)}>Toggle word wrap <kbd>Alt+Z</kbd></button>
     </div>
   </header>
+  {#if gitAvailable === false && !gitBannerDismissed}
+    <div role="alert" class="git-missing-banner">
+      <span>Git is not installed. Please install Git (https://git-scm.com) first to commit and view note history.</span>
+      <button type="button" onclick={() => { gitBannerDismissed = true; }}>Dismiss</button>
+    </div>
+  {/if}
   {#if startupError}<div role="alert" class="p-3 bg-red-950">Could not load workspace: {startupError}</div>{/if}
   {#if recoveryError}<div role="alert" class="p-3 bg-red-950">Recovery failed: {recoveryError} <button onclick={() => run(() => checkpoint())}>Retry</button></div>{/if}
   {#if active?.external}<div role="alert" class="p-3 bg-amber-950">{active.external === 'deleted' ? 'File deleted or moved on disk.' : active.external === 'changed' ? 'File changed on disk.' : 'File unreadable.'} <button onclick={() => run(() => saveFile(workspace.active,true).then(() => {}))}>Save copy in root</button>{#if active.external !== 'deleted'}<button onclick={() => run(reloadDisk)}>Reload from disk</button>{/if}</div>{/if}
@@ -1104,9 +1357,10 @@
     <nav class="activity-bar" aria-label="Workspace views">
       <button title="Explorer (Ctrl+Shift+E)" aria-label="Explorer" aria-pressed={workspace.sidebar && panel === 'explorer'} onclick={() => run(() => showPanel('explorer'))}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h8l4 4v14H8zM16 3v5h4M5 6H3v15h2"/></svg></button>
       <button title="Search (Ctrl+Shift+F)" aria-label="Search" aria-pressed={workspace.sidebar && panel === 'search'} onclick={() => run(() => showPanel('search'))}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg></button>
+      <button title="Source Control (Ctrl+Shift+G)" aria-label="Source Control" aria-pressed={workspace.sidebar && panel === 'git'} onclick={() => run(() => showPanel('git'))}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="8" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M6 8.5v7M6 15.5c0-4 12-1 12-5"/></svg></button>
     </nav>
     {#if workspace.sidebar}<aside class="note-sidebar" aria-label={panel} oncontextmenu={sidebarContext}>
-      <div class="sidebar-header"><span class="sidebar-title">{panel.toUpperCase()}</span><div class="sidebar-actions"><button onclick={() => run(setRootFolder)}>{workspace.root ? 'Change root…' : 'Set root…'}</button><button class="sidebar-btn" aria-label="Refresh folder" title="Refresh" onclick={() => run(refresh)}>↻</button></div></div>
+      <div class="sidebar-header"><span class="sidebar-title">{panel === 'git' ? 'SOURCE CONTROL' : panel.toUpperCase()}</span><div class="sidebar-actions"><button onclick={() => run(setRootFolder)}>{workspace.root ? 'Change root…' : 'Set root…'}</button><button class="sidebar-btn" aria-label="Refresh folder" title="Refresh" onclick={() => run(refresh)}>↻</button></div></div>
       {#if workspace.root}<p class="sidebar-root-info">{files.displayPath(workspace.root)}</p>{/if}
       {#if panel === 'search'}
         <form class="library-search" onsubmit={event => { event.preventDefault(); run(refresh); }}>
@@ -1142,6 +1396,67 @@
               {/each}
             {/if}
           {/each}
+        {/if}
+      {:else if panel === 'git'}
+        {#if !active}
+          <p class="empty-library">Open a note to view history</p>
+        {:else if gitAvailable === false}
+          <p class="empty-library">Git is not installed. Please install Git (https://git-scm.com) first.</p>
+        {:else if !workspace.root || files.isUnsavedBuffer(active, workspace.root)}
+          <div class="vcs-commit-form">
+            <p class="empty-library">Save this note in the root folder to use Git history.</p>
+            <button type="button" class="vcs-commit-submit header-btn-primary" disabled={busy || frozen} onclick={() => run(() => saveFile(active.id).then(() => {}))}>Save to root…</button>
+          </div>
+        {:else if vcsState && !vcsState.supported}
+          <p class="empty-library">History is available for saved note packages in the workspace root.</p>
+        {:else if vcsState}
+          {@const dirty = vcsState.dirty || files.modified(active)}
+          <div class="vcs-note-header">
+            <span class="vcs-note-name" title={files.displayPath(active.path!)}>{files.title(active)}</span>
+            <span class={`vcs-status-pill ${dirty ? 'dirty' : 'clean'}`}>{!vcsState.initialized ? 'Untracked' : dirty ? 'Modified' : 'Clean'}</span>
+          </div>
+          <form class="vcs-commit-form" onsubmit={event => { event.preventDefault(); run(commitFromSidebar); }}>
+            <input id="sidebar-commit-input" aria-label="Commit message" bind:value={sidebarCommitMsg} spellcheck="false" autocomplete="off"/>
+            <button type="submit" class="vcs-commit-submit header-btn-primary" disabled={busy || frozen || (vcsState.initialized && !dirty)}>Commit</button>
+          </form>
+          {#if dirty}
+            <div class="sidebar-section-label">Changes</div>
+            <button
+              class="vcs-change-row"
+              class:current={Boolean(diffView && diffView.hash === null)}
+              onclick={() => run(() => openDiff(null, 'Working Changes'))}
+            >
+              <span class="file-name">{files.title(active)}</span>
+              <span class={`vcs-change-badge ${vcsState.initialized ? 'modified' : 'untracked'}`}>{vcsState.initialized ? 'M' : 'U'}</span>
+            </button>
+          {/if}
+          <div class="sidebar-section-label">Timeline ({vcsState.commits.length})</div>
+          {#if !vcsState.commits.length}
+            <p class="empty-library">No commits yet</p>
+          {:else}
+            <div class="vcs-timeline">
+              {#each vcsState.commits as commit, index (commit.hash)}
+                <button
+                  class="vcs-commit-row"
+                  class:head={index === 0}
+                  class:selected={Boolean(diffView && diffView.hash === commit.hash)}
+                  title={`${commit.shortHash} — ${commit.subject}`}
+                  onclick={() => run(() => openDiff(commit.hash, `${commit.shortHash}: ${commit.subject}`, 'parent'))}
+                  oncontextmenu={event => commitContext(event, commit)}
+                >
+                  <span class="vcs-commit-dot" aria-hidden="true"></span>
+                  <div class="vcs-commit-body">
+                    <span class="vcs-commit-subject">{commit.subject}</span>
+                    <span class="vcs-commit-meta">
+                      <span class="vcs-sha">{commit.shortHash}</span>
+                      <span>·</span>
+                      <span>{vcs.formatRelativeTime(commit.timestamp)}</span>
+                    </span>
+                  </div>
+                </button>
+              {/each}
+            </div>
+          {/if}
         {/if}
       {:else}
         {#if unsavedBuffers.length}
@@ -1217,8 +1532,50 @@
       </div>
       {#if findVisible}<form class="find-bar" onsubmit={find}><input id="find" aria-label="Find in file" bind:value={findQuery} oninput={onFindInput} placeholder="Find…" onkeydown={event => { if (event.key === 'Escape') { event.preventDefault(); closeFind(); } else if (event.key === 'Enter' && event.shiftKey) { event.preventDefault(); stepFind(true); } }}/><button type="button" aria-label="Previous match" title="Previous match (Shift+Enter)" onclick={() => stepFind(true)}>↑</button><button type="submit" aria-label="Next match" title="Next match (Enter)">↓</button><button type="button" aria-label="Close find" onclick={closeFind}>×</button></form>{/if}
       <div id="file-panel" role="tabpanel" tabindex="0" aria-label="Active file" class="relative min-h-0 min-w-0 flex-1" oncontextmenu={editorContext}>
-        <div class="h-full" class:hidden={!active} bind:this={host}></div>
-        {#if !active && !loading}<div class="empty-workspace"><h1 class="empty-title">Simple Note</h1><div class="empty-actions"><button onclick={() => run(newFile)}>New file</button><button onclick={() => run(setRootFolder)}>{workspace.root ? 'Change root folder…' : 'Set root folder…'}</button><button onclick={() => run(() => showPanel('explorer'))}>Explorer</button></div></div>{/if}
+        <div class="h-full" class:hidden={!active || Boolean(diffView)} bind:this={host}></div>
+        {#if diffView}
+          <div class="diff-viewer" aria-label="Diff viewer">
+            <div class="diff-header">
+              <span class="diff-title" title={diffView.subject}>{diffView.label} · {diffView.subject}</span>
+              {#if diffView.hash !== null}
+                <div class="diff-mode-group" role="group" aria-label="Comparison mode">
+                  <button type="button" aria-pressed={diffView.mode === 'parent'} onclick={() => run(() => openDiff(diffView!.hash, diffView!.subject, 'parent'))}>Commit</button>
+                  <button type="button" aria-pressed={diffView.mode === 'working'} onclick={() => run(() => openDiff(diffView!.hash, diffView!.subject, 'working'))}>vs Current</button>
+                </div>
+              {/if}
+              <span class="diff-stats">
+                <span class="diff-stat-add">+{diffView.summary.added}</span>
+                <span class="diff-stat-del">-{diffView.summary.removed}</span>
+              </span>
+              {#if diffView.metaChanged || diffView.assetsChanged}
+                <span class="diff-extra-badge">
+                  {#if diffView.metaChanged && diffView.assetsChanged}Annotations &amp; assets changed
+                  {:else if diffView.metaChanged}Annotations changed
+                  {:else}Assets changed{/if}
+                </span>
+              {/if}
+              {#if diffView.hash !== null}
+                <button type="button" disabled={busy || frozen} onclick={() => promptRestore({ hash: diffView!.hash!, shortHash: diffView!.hash!.slice(0, 7) })}>Restore</button>
+              {/if}
+              <button type="button" aria-label="Close diff" title="Close (Esc)" onclick={closeDiff}>×</button>
+            </div>
+            <div class="diff-scroll" class:wrap={workspace.wrap}>
+              {#if !diffView.summary.lines.length}
+                <p class="empty-library">Empty file</p>
+              {:else}
+                {#each diffView.summary.lines as line}
+                  <div class={`diff-row ${line.kind === 'add' ? 'add' : line.kind === 'del' ? 'del' : ''}`}>
+                    <span class="diff-num">{line.oldLine ?? ''}</span>
+                    <span class="diff-num">{line.newLine ?? ''}</span>
+                    <span class="diff-sign">{line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ' '}</span>
+                    <span class="diff-code">{line.text || ' '}</span>
+                  </div>
+                {/each}
+              {/if}
+            </div>
+          </div>
+        {/if}
+        {#if !active && !loading && !diffView}<div class="empty-workspace"><h1 class="empty-title">Simple Note</h1><div class="empty-actions"><button onclick={() => run(newFile)}>New file</button><button onclick={() => run(setRootFolder)}>{workspace.root ? 'Change root folder…' : 'Set root folder…'}</button><button onclick={() => run(() => showPanel('explorer'))}>Explorer</button></div></div>{/if}
       </div>
     </div>
   </div>
@@ -1239,5 +1596,18 @@
     {#if saveError}<p role="alert" class="save-dialog-error">{saveError}</p>{/if}
     <div class="dialog-actions"><button type="button" disabled={busy} onclick={cancelSavePrompt}>Cancel</button><button type="submit" class="header-btn-primary" disabled={busy}>Save</button></div>
   </form>
+</dialog>
+<dialog bind:this={commitDialog} class="settings-dialog save-dialog" aria-labelledby="commit-heading" oncancel={event => { if (busy) { event.preventDefault(); return; } commitTargetId = null; commitError = ''; view?.focus(); }}>
+  <form class="save-dialog-form" onsubmit={event => { event.preventDefault(); confirmCommitDialog(); }}>
+    <h2 id="commit-heading">Commit snapshot</h2>
+    <input id="commit-message-input" aria-label="Commit message" bind:value={commitMessage} readonly={busy} spellcheck="false" autocomplete="off" oninput={() => { if (commitError) commitError = ''; }} />
+    {#if commitError}<p role="alert" class="save-dialog-error">{commitError}</p>{/if}
+    <div class="dialog-actions"><button type="button" disabled={busy} onclick={cancelCommitDialog}>Cancel</button><button type="submit" class="header-btn-primary" disabled={busy}>Commit</button></div>
+  </form>
+</dialog>
+<dialog bind:this={restoreDialog} class="settings-dialog" aria-labelledby="restore-heading" oncancel={() => { restoreTarget = null; }}>
+  <h2 id="restore-heading">Restore version {restoreTarget?.shortHash ?? ''}?</h2>
+  <p class="mt-2 text-xs text-[var(--text-secondary)]">Note text, image annotations, and assets will be restored to your working copy. Existing commit history stays intact.</p>
+  <div class="dialog-actions"><button disabled={busy} onclick={() => run(confirmRestore)}>Restore</button><button disabled={busy} onclick={() => { restoreDialog.close(); restoreTarget = null; }}>Cancel</button></div>
 </dialog>
 {#if annotation}<AnnotationEditor block={annotation.block} blob={annotation.blob} status={recoveryError} onchange={annotate} onoutput={outputAnnotation} onclose={() => { annotation = undefined; view?.focus(); }}/>{/if}

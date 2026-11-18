@@ -998,7 +998,8 @@ mark.search-match-mark {
   font-weight: 600;
   color: var(--text-primary);
 }
-#save-name-input {
+#save-name-input,
+#commit-message-input {
   width: 100%;
   font-size: 13px;
   padding: 6px 10px;
@@ -1011,6 +1012,316 @@ mark.search-match-mark {
 .save-dialog .dialog-actions {
   margin-top: 6px;
   padding-top: 12px;
+}
+
+/* Git Missing Warning Banner */
+.git-missing-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 12px;
+  background: rgba(245, 158, 11, 0.14);
+  border-bottom: 1px solid rgba(245, 158, 11, 0.35);
+  color: #fde68a;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.git-missing-banner button {
+  padding: 2px 8px;
+  font-size: 11px;
+  color: #fde68a;
+  border-color: rgba(245, 158, 11, 0.35);
+}
+
+/* Source Control Sidebar (VS Code style) */
+.vcs-note-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 6px 8px;
+}
+.vcs-note-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  flex: 1;
+  min-width: 0;
+}
+.vcs-status-pill {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+.vcs-status-pill.dirty {
+  background: rgba(245, 158, 11, 0.16);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+.vcs-status-pill.clean {
+  background: rgba(16, 185, 129, 0.14);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.28);
+}
+.vcs-commit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 4px 10px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+#sidebar-commit-input {
+  width: 100%;
+  font-size: 12px;
+  padding: 5px 8px;
+}
+.vcs-commit-submit {
+  width: 100%;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.vcs-change-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  height: 28px;
+  padding: 3px 8px;
+  border-radius: 5px;
+  text-align: left;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.vcs-change-row.current {
+  background: rgba(99, 102, 241, 0.16);
+}
+.vcs-change-badge {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.vcs-change-badge.modified {
+  color: #fbbf24;
+}
+.vcs-change-badge.untracked {
+  color: #34d399;
+}
+.vcs-timeline {
+  display: flex;
+  flex-direction: column;
+}
+.vcs-commit-row {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 8px 6px 24px;
+  border-radius: 5px;
+  text-align: left;
+  color: var(--text-secondary);
+}
+.vcs-commit-row::before {
+  content: '';
+  position: absolute;
+  left: 12px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border-light);
+}
+.vcs-commit-row:first-child::before {
+  top: 13px;
+}
+.vcs-commit-row:last-child::before {
+  bottom: calc(100% - 13px);
+}
+.vcs-commit-row:only-child::before {
+  display: none;
+}
+.vcs-commit-dot {
+  position: absolute;
+  left: 8.5px;
+  top: 10px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #3a3d4e;
+  border: 1.5px solid var(--bg-sidebar);
+  z-index: 1;
+}
+.vcs-commit-row.head .vcs-commit-dot,
+.vcs-commit-row.selected .vcs-commit-dot {
+  background: #6366f1;
+}
+.vcs-commit-row.selected {
+  background: rgba(99, 102, 241, 0.15);
+  color: var(--text-primary);
+}
+.vcs-commit-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.vcs-commit-subject {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vcs-commit-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.vcs-sha {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 10px;
+  color: #a5b4fc;
+}
+
+/* VS Code-style Inline Diff Viewer */
+.diff-viewer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg-editor);
+}
+.diff-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 12px;
+  background: var(--bg-header);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  font-size: 12px;
+}
+.diff-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-right: auto;
+}
+.diff-mode-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: #0e0f14;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 2px;
+}
+.diff-mode-group button {
+  padding: 2px 7px;
+  font-size: 11px;
+  border-radius: 3px;
+}
+.diff-stats {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 11px;
+}
+.diff-stat-add {
+  color: #34d399;
+}
+.diff-stat-del {
+  color: #fb7185;
+}
+.diff-extra-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(56, 189, 248, 0.14);
+  color: #7dd3fc;
+  border: 1px solid rgba(56, 189, 248, 0.28);
+}
+.diff-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  padding: 8px 0;
+}
+.diff-row {
+  display: flex;
+  align-items: stretch;
+  min-width: 100%;
+}
+.diff-row.add {
+  background: rgba(16, 185, 129, 0.14);
+  color: #d1fae5;
+}
+.diff-row.del {
+  background: rgba(244, 63, 94, 0.14);
+  color: #ffe4e6;
+}
+.diff-num {
+  width: 44px;
+  padding: 0 8px;
+  text-align: right;
+  color: var(--text-muted);
+  user-select: none;
+  flex-shrink: 0;
+  font-size: 11px;
+  line-height: 1.85;
+}
+.diff-row.add .diff-num {
+  background: rgba(16, 185, 129, 0.24);
+  color: #a7f3d0;
+}
+.diff-row.del .diff-num {
+  background: rgba(244, 63, 94, 0.24);
+  color: #fecdd3;
+}
+.diff-sign {
+  width: 20px;
+  text-align: center;
+  user-select: none;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+.diff-row.add .diff-sign {
+  color: #34d399;
+  font-weight: 600;
+}
+.diff-row.del .diff-sign {
+  color: #fb7185;
+  font-weight: 600;
+}
+.diff-code {
+  flex: 1;
+  min-width: 0;
+  padding-right: 16px;
+  white-space: pre;
+}
+.diff-scroll.wrap .diff-code {
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 @media (max-width: 640px) {

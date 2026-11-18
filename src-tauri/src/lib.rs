@@ -16,6 +16,7 @@ mod queue;
 mod recovery;
 #[allow(dead_code)] // Legacy data remains untouched; its regression tests stay available.
 mod storage;
+mod vcs;
 use tauri::Manager;
 
 /// One instance owns the recovery files; saved documents stay in their chosen locations.
@@ -55,6 +56,7 @@ pub fn run() {
             image_output::export_image,
             files::file_operation,
             files::file_picker,
+            vcs::vcs_operation,
             clipboard::file_clipboard,
             clipboard::clipboard_read_text,
             clipboard::clipboard_write_text,
