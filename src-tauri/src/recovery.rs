@@ -108,7 +108,7 @@ pub async fn export_recovery(
         app.dialog()
             .file()
             .add_filter("Recovery JSON", &["json"])
-            .set_file_name("simple-note-recovery.json")
+            .set_file_name("sidenote-recovery.json")
             .blocking_save_file()
     })
     .await

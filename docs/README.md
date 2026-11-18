@@ -1,4 +1,4 @@
-# Simple Note documentation
+# Sidenote documentation
 
 Status: planned. These documents describe the first release; features are not implemented yet.
 

@@ -34,8 +34,8 @@ pub async fn export_backup(
     let destination = tauri::async_runtime::spawn_blocking(move || {
         app.dialog()
             .file()
-            .add_filter("Simple Note SQLite backup", &["sqlite3"])
-            .set_file_name("simple-note-backup.sqlite3")
+            .add_filter("Sidenote SQLite backup", &["sqlite3"])
+            .set_file_name("sidenote-backup.sqlite3")
             .blocking_save_file()
     })
     .await
@@ -65,7 +65,7 @@ pub async fn prepare_restore(
             .dialog()
             .file()
             .set_directory(directory.join("backups"))
-            .add_filter("Simple Note SQLite backup", &["sqlite3"])
+            .add_filter("Sidenote SQLite backup", &["sqlite3"])
             .blocking_pick_file();
         source
             .map(|source| {

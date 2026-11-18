@@ -1,4 +1,6 @@
-# Simple Note
+# Sidenote
+
+The app keeps the legacy application ID `com.ryan.simple-note` and `.simple-note.json` metadata names for compatibility with existing recovery data and documents.
 
 A small Tauri/Svelte/CodeMirror file editor with inline local images and editable annotations.
 

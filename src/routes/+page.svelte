@@ -1506,10 +1506,10 @@
   });
 </script>
 
-<svelte:head><title>Simple Note</title></svelte:head>
+<svelte:head><title>Sidenote</title></svelte:head>
 <main class="flex h-dvh flex-col bg-[var(--bg-app)] text-sm text-[var(--text-primary)]" aria-busy={busy || loading || frozen}>
   <header class="app-header">
-    <div class="app-brand"><img class="app-mark" src="/app-icon.png" alt=""/><span class="app-title">Simple Note</span></div>
+    <div class="app-brand"><img class="app-mark" src="/app-icon.png" alt=""/><span class="app-title">Sidenote</span></div>
     <nav class="app-menubar" aria-label="Application menus">
       {#each ['File','Edit','View'] as name}<button type="button" aria-haspopup="true" onclick={event => menu(event,`app-${name}`)}>{name}</button>{/each}
     </nav>
@@ -1997,7 +1997,7 @@
             </div>
           </div>
         {/if}
-        {#if !active && !loading && !diffView}<div class="empty-workspace"><h1 class="empty-title">Simple Note</h1><div class="empty-actions"><button onclick={() => run(newFile)}>New file</button><button onclick={() => run(setRootFolder)}>{workspace.root ? 'Change root folder…' : 'Set root folder…'}</button><button onclick={() => run(() => showPanel('explorer'))}>Explorer</button></div></div>{/if}
+        {#if !active && !loading && !diffView}<div class="empty-workspace"><h1 class="empty-title">Sidenote</h1><div class="empty-actions"><button onclick={() => run(newFile)}>New file</button><button onclick={() => run(setRootFolder)}>{workspace.root ? 'Change root folder…' : 'Set root folder…'}</button><button onclick={() => run(() => showPanel('explorer'))}>Explorer</button></div></div>{/if}
       </div>
     </div>
   </div>

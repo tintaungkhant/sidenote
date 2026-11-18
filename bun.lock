@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "simple-note",
+      "name": "sidenote",
       "dependencies": {
         "@codemirror/commands": "^6.11.1",
         "@codemirror/lang-css": "^6.3.1",

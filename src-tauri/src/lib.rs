@@ -66,7 +66,7 @@ pub fn run() {
             lifecycle::finish_exit
         ])
         .build(tauri::generate_context!())
-        .expect("Unable to start simple-note; the existing database has been preserved");
+        .expect("Unable to start Sidenote; the existing database has been preserved");
     app.run(|app, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
             if !app.state::<lifecycle::ExitState>().approved() {

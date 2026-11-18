@@ -394,7 +394,7 @@ fn listing_does_not_decode_document_bodies() {
 /// A subprocess holds a live WAL connection until the parent terminates it without Rust destructors.
 #[test]
 fn acknowledged_commit_child() {
-    let Some(directory) = std::env::var_os("SIMPLE_NOTE_COMMIT_PROBE") else {
+    let Some(directory) = std::env::var_os("SIDENOTE_COMMIT_PROBE") else {
         return;
     };
     let directory = std::path::PathBuf::from(directory);
@@ -439,7 +439,7 @@ fn acknowledged_commits_survive_forced_termination() {
             "storage::tests::acknowledged_commit_child",
             "--nocapture",
         ])
-        .env("SIMPLE_NOTE_COMMIT_PROBE", directory.path())
+        .env("SIDENOTE_COMMIT_PROBE", directory.path())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

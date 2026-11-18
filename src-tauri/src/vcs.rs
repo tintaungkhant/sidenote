@@ -359,10 +359,10 @@ pub(crate) fn commit(root: &Path, path: &Path, message: &str) -> Result<Value> {
     let has_email = git_config_nonempty(&repo_dir, "user.email")?;
     let mut args = vec!["-c", "commit.gpgsign=false"];
     if !has_name {
-        args.extend(["-c", "user.name=Simple Note"]);
+        args.extend(["-c", "user.name=Sidenote"]);
     }
     if !has_email {
-        args.extend(["-c", "user.email=local@simple-note"]);
+        args.extend(["-c", "user.email=local@sidenote"]);
     }
     args.extend(["commit", "-m", msg]);
     run_git_ok(Some(&repo_dir), &args)?;
