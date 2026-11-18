@@ -51,3 +51,17 @@ cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 ```
 
 Focused tests cover package reopening after relocation, asset bytes and annotations, failure preservation, standalone saves, stale revisions, deletion, source reference rewriting with UTF-16 positions, comment parsing/insertion, dirty-tab transitions, and recovery. The live native screenshot-clipboard test is ignored unless a real screenshot is available.
+
+## Windows and macOS installers
+
+The **Build desktop installers** GitHub Actions workflow runs manually from the repository's Actions tab or when a `v*` tag is pushed (for example, `v0.1.0`). The workflow must be on the default branch for the manual Run workflow button to appear.
+
+Each build checks the frontend, runs frontend and native tests, and builds unsigned installers on standard GitHub-hosted runners:
+
+- `sidenote-windows-x64`: Windows x64 NSIS `.exe` installer.
+- `sidenote-macos-apple-silicon`: Apple Silicon `.dmg` installer.
+- `sidenote-macos-intel`: Intel Mac `.dmg` installer.
+
+Download the ZIP files from **Artifacts** on the completed workflow run and extract the installer. Artifacts expire after 14 days. No GitHub Release is published, and no signing credentials are required. GitHub-hosted builds are free for public repositories using standard runners; private repositories use the account's included allowance and billing settings.
+
+These installers are unsigned and macOS builds are not notarized, so Windows SmartScreen or macOS Gatekeeper may warn or block opening them. The workflow verifies builds and automated tests; it does not verify installation or interactive desktop behavior on either OS.
