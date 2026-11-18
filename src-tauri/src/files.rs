@@ -116,8 +116,10 @@ fn not_present(path: &Path) -> Result<bool> {
         Err(e) => Err(fail(e)),
     }
 }
-fn is_available(path: &Path) -> Result<bool> {
-    Ok(not_present(path)? && not_present(&companion(path)?)?)
+fn is_stem_available_in_root(root: &Path, stem: &str, ext: &str) -> Result<bool> {
+    Ok(not_present(&root.join(stem))?
+        && not_present(&root.join(format!("{stem}.{ext}")))?
+        && not_present(&root.join(format!("{stem}.{ext}.simple-note.json")))?)
 }
 fn sanitize_stem_ext(preferred: Option<&str>) -> Result<(String, String)> {
     let raw = preferred.map(str::trim).filter(|s| !s.is_empty());
@@ -145,6 +147,12 @@ fn sanitize_stem_ext(preferred: Option<&str>) -> Result<(String, String)> {
     };
     if stem.is_empty() || ext.is_empty() || stem.ends_with(' ') || stem.ends_with('.') {
         return Err(fail("Invalid file name"));
+    }
+    if matches!(
+        stem.to_ascii_lowercase().as_str(),
+        ".git" | "node_modules" | "target" | "assets"
+    ) {
+        return Err(fail("Reserved folder name"));
     }
     let base = stem.split('.').next().unwrap_or(stem).trim_end_matches(' ');
     let upper = base.to_ascii_uppercase();
@@ -320,11 +328,19 @@ fn save(path: &Path, expected: &str, source: &str, metadata: &Value) -> Result<D
         ));
     }
     let sidecar = companion(path)?;
+    let sidecar_bytes = if sidecar.file_name() == Some(std::ffi::OsStr::new(".simple-note.json")) {
+        let mut meta = metadata.clone();
+        if let Some(obj) = meta.as_object_mut()
+            && let Some(file_name) = path.file_name()
+        {
+            obj.insert("main".into(), json!(file_name.to_string_lossy()));
+        }
+        serde_json::to_vec_pretty(&meta).map_err(fail)?
+    } else {
+        serde_json::to_vec_pretty(metadata).map_err(fail)?
+    };
     // Recovery is committed by the renderer before this operation. Metadata first keeps new references resolvable.
-    atomic(
-        &sidecar,
-        &serde_json::to_vec_pretty(metadata).map_err(fail)?,
-    )?;
+    atomic(&sidecar, &sidecar_bytes)?;
     replace_existing(path, source.as_bytes())?;
     load(path)
 }
@@ -505,109 +521,102 @@ impl FileStore {
             return Err(fail("Root path is not a folder"));
         }
         let (stem, ext) = sanitize_stem_ext(preferred)?;
-        let initial = root.join(format!("{stem}.{ext}"));
-        let target = if is_available(&initial)? {
-            initial
+        let chosen_stem = if is_stem_available_in_root(&root, &stem, &ext)? {
+            stem
         } else {
             let base = strip_numeric_suffix(&stem);
             let mut found = None;
             for n in 1..=100_000 {
-                let candidate = root.join(format!("{base}-{n}.{ext}"));
-                if is_available(&candidate)? {
+                let candidate = format!("{base}-{n}");
+                if is_stem_available_in_root(&root, &candidate, &ext)? {
                     found = Some(candidate);
                     break;
                 }
             }
-            found.ok_or_else(|| fail("Too many files with that name in root folder"))?
+            found.ok_or_else(|| fail("Too many notes with that name in root folder"))?
         };
+        let folder = root.join(&chosen_stem);
+        let file_name = format!("{chosen_stem}.{ext}");
+        let stage = tempfile::tempdir_in(&root).map_err(fail)?;
+        let stage_assets = stage.path().join("assets");
+        fs::create_dir(&stage_assets).map_err(fail)?;
         let mut rewritten = source.to_owned();
         let mut meta = metadata.clone();
         if !assets.is_empty() {
-            let assets_folder = root.join("assets");
-            fs::create_dir_all(&assets_folder).map_err(fail)?;
-            let canonical_assets = fs::canonicalize(&assets_folder).map_err(fail)?;
-            if !canonical_assets.starts_with(&root)
-                || canonical_assets.parent() != Some(root.as_path())
-            {
-                return Err(fail("Assets folder points outside the root folder"));
-            }
             let mut mappings = std::collections::BTreeMap::new();
             for asset in assets {
                 let reference = &asset.path;
                 if mappings.contains_key(reference) {
                     continue;
                 }
-                if let Some(relative) = reference.strip_prefix("recovery:") {
-                    if !relative
-                        .strip_prefix("assets/")
-                        .is_some_and(|name| !name.is_empty() && !name.contains('/'))
-                    {
-                        return Err(fail("Invalid recovery asset reference"));
-                    }
-                    let bytes = read(&asset_path(&self.recovery, relative)?, 20 * 1024 * 1024)?;
-                    validate_image(&bytes)?;
-                    let img_ext =
-                        if image::guess_format(&bytes).map_err(fail)? == image::ImageFormat::Png {
-                            "png"
-                        } else {
-                            "jpg"
-                        };
-                    let filename = Path::new(relative)
-                        .file_name()
-                        .ok_or_else(|| fail("Invalid asset name"))?;
-                    let candidate = assets_folder.join(filename);
-                    let destination = if candidate.exists() {
-                        if read(&candidate, 20 * 1024 * 1024)? == bytes {
-                            format!("./{relative}")
-                        } else {
-                            let new_rel = format!("assets/{}.{img_ext}", uuid::Uuid::new_v4());
-                            atomic_noclobber(&root.join(&new_rel), &bytes)?;
-                            format!("./{new_rel}")
+                let (bytes, preferred_name) =
+                    if let Some(relative) = reference.strip_prefix("recovery:") {
+                        if !relative
+                            .strip_prefix("assets/")
+                            .is_some_and(|name| !name.is_empty() && !name.contains('/'))
+                        {
+                            return Err(fail("Invalid recovery asset reference"));
                         }
+                        let orig = asset_path(&self.recovery, relative)?;
+                        let bytes = read(&orig, 20 * 1024 * 1024)?;
+                        let name = Path::new(relative)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .ok_or_else(|| fail("Invalid asset name"))?
+                            .to_owned();
+                        (bytes, name)
                     } else {
-                        atomic_noclobber(&candidate, &bytes)?;
-                        format!("./{relative}")
+                        let origin = origin.ok_or_else(|| fail("Image has no source folder"))?;
+                        let orig = asset_path(origin, reference)?;
+                        let bytes = read(&orig, 20 * 1024 * 1024)?;
+                        let name = orig
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .ok_or_else(|| fail("Invalid asset name"))?
+                            .to_owned();
+                        (bytes, name)
                     };
-                    mappings.insert(reference.clone(), destination.clone());
-                    if let Some(value) = meta["images"].as_object_mut().unwrap().remove(reference) {
-                        meta["images"][&destination] = value;
+                validate_image(&bytes)?;
+                let img_ext =
+                    if image::guess_format(&bytes).map_err(fail)? == image::ImageFormat::Png {
+                        "png"
+                    } else {
+                        "jpg"
+                    };
+                let candidate = stage_assets.join(&preferred_name);
+                let chosen_asset_name = if candidate.exists() {
+                    if read(&candidate, 20 * 1024 * 1024)? == bytes {
+                        preferred_name
+                    } else {
+                        let unique = format!("{}.{img_ext}", uuid::Uuid::new_v4());
+                        atomic_noclobber(&stage_assets.join(&unique), &bytes)?;
+                        unique
                     }
                 } else {
-                    let origin = origin.ok_or_else(|| fail("Image has no source folder"))?;
-                    let original = asset_path(origin, reference)?;
-                    let bytes = read(&original, 20 * 1024 * 1024)?;
-                    validate_image(&bytes)?;
-                    let same_root = fs::canonicalize(origin).ok().as_ref() == Some(&root);
-                    if same_root && asset_path(&root, reference).is_ok() {
-                        continue;
-                    }
-                    let img_ext =
-                        if image::guess_format(&bytes).map_err(fail)? == image::ImageFormat::Png {
-                            "png"
-                        } else {
-                            "jpg"
-                        };
-                    let new_rel = format!("assets/{}.{img_ext}", uuid::Uuid::new_v4());
-                    atomic_noclobber(&root.join(&new_rel), &bytes)?;
-                    let destination = format!("./{new_rel}");
-                    mappings.insert(reference.clone(), destination.clone());
-                    if let Some(value) = meta["images"].as_object_mut().unwrap().remove(reference) {
-                        meta["images"][&destination] = value;
-                    }
+                    atomic_noclobber(&candidate, &bytes)?;
+                    preferred_name
+                };
+                let destination = format!("./assets/{chosen_asset_name}");
+                mappings.insert(reference.clone(), destination.clone());
+                if let Some(value) = meta["images"].as_object_mut().unwrap().remove(reference) {
+                    meta["images"][&destination] = value;
                 }
             }
             rewritten = rewrite(&rewritten, assets, &mappings)?;
         }
         if let Some(obj) = meta.as_object_mut() {
-            obj.remove("main");
+            obj.insert("main".into(), json!(file_name));
         }
-        atomic_noclobber(&target, rewritten.as_bytes())?;
-        let sidecar = root.join(format!(
-            "{}.simple-note.json",
-            target.file_name().unwrap().to_string_lossy()
-        ));
-        atomic(&sidecar, &serde_json::to_vec_pretty(&meta).map_err(fail)?)?;
-        load(&target)
+        atomic_noclobber(&stage.path().join(&file_name), rewritten.as_bytes())?;
+        atomic_noclobber(
+            &stage.path().join(".simple-note.json"),
+            &serde_json::to_vec_pretty(&meta).map_err(fail)?,
+        )?;
+        if !not_present(&folder)? {
+            return Err(fail("Document folder already exists"));
+        }
+        fs::rename(stage.path(), &folder).map_err(fail)?;
+        load(&folder.join(&file_name))
     }
     fn rename(&self, root: &Path, path: &Path, name: &str) -> Result<DiskDocument> {
         let root = fs::canonicalize(root).map_err(fail)?;
@@ -634,15 +643,79 @@ impl FileStore {
         let parent = current
             .parent()
             .ok_or_else(|| fail("No parent directory"))?;
+        let _ = load(&current)?;
+        let old_sidecar = companion(&current)?;
+        if parent != root
+            && old_sidecar.file_name() == Some(std::ffi::OsStr::new(".simple-note.json"))
+        {
+            let container = parent.parent().ok_or_else(|| fail("No parent directory"))?;
+            let old_file_name = current
+                .file_name()
+                .ok_or_else(|| fail("Invalid file name"))?
+                .to_os_string();
+            let same_folder_exact = parent.file_name() == Some(std::ffi::OsStr::new(&stem));
+            let same_file_exact = old_file_name == std::ffi::OsStr::new(&final_name);
+            if same_folder_exact && same_file_exact {
+                return load(&current);
+            }
+            let new_folder = container.join(&stem);
+            if !same_folder_exact {
+                if !not_present(&new_folder)?
+                    && fs::canonicalize(&new_folder).ok().as_ref() != Some(&parent.to_path_buf())
+                {
+                    return Err(fail("A note folder with that name already exists"));
+                }
+                if container == root
+                    && (!not_present(&root.join(&final_name))?
+                        || !not_present(&root.join(format!("{final_name}.simple-note.json")))?)
+                {
+                    return Err(fail("A file with that name already exists"));
+                }
+            }
+            if !same_file_exact {
+                let in_parent = parent.join(&final_name);
+                if !not_present(&in_parent)?
+                    && fs::canonicalize(&in_parent).ok().as_ref() != Some(&current)
+                {
+                    return Err(fail("A file with that name already exists"));
+                }
+            }
+            let active_folder = if !same_folder_exact {
+                fs::rename(parent, &new_folder).map_err(fail)?;
+                new_folder
+            } else {
+                parent.to_path_buf()
+            };
+            if !same_file_exact {
+                fs::rename(
+                    active_folder.join(&old_file_name),
+                    active_folder.join(&final_name),
+                )
+                .map_err(fail)?;
+            }
+            let sidecar = active_folder.join(".simple-note.json");
+            let mut meta: Value = serde_json::from_str(&text(&sidecar)?).map_err(fail)?;
+            if let Some(obj) = meta.as_object_mut() {
+                obj.insert("main".into(), json!(final_name));
+            }
+            atomic(&sidecar, &serde_json::to_vec_pretty(&meta).map_err(fail)?)?;
+            return load(&active_folder.join(&final_name));
+        }
         let target = parent.join(&final_name);
         if target == current {
             return load(&current);
         }
-        if !is_available(&target)? {
+        if !not_present(&target)? && fs::canonicalize(&target).ok().as_ref() != Some(&current) {
             return Err(fail("A file with that name already exists"));
         }
-        let _ = load(&current)?;
-        let old_sidecar = companion(&current)?;
+        let new_sidecar = parent.join(format!("{final_name}.simple-note.json"));
+        if old_sidecar.exists()
+            && !not_present(&new_sidecar)?
+            && fs::canonicalize(&new_sidecar).ok().as_ref()
+                != fs::canonicalize(&old_sidecar).ok().as_ref()
+        {
+            return Err(fail("A file with that name already exists"));
+        }
         fs::rename(&current, &target).map_err(fail)?;
         if old_sidecar.file_name() == Some(std::ffi::OsStr::new(".simple-note.json")) {
             let mut meta: Value = serde_json::from_str(&text(&old_sidecar)?).map_err(fail)?;
@@ -654,10 +727,140 @@ impl FileStore {
                 &serde_json::to_vec_pretty(&meta).map_err(fail)?,
             )?;
         } else if old_sidecar.exists() {
-            let new_sidecar = parent.join(format!("{final_name}.simple-note.json"));
             fs::rename(&old_sidecar, &new_sidecar).map_err(fail)?;
         }
         load(&target)
+    }
+    fn migrate_root(&self, root: &Path) -> Result<std::collections::BTreeMap<String, String>> {
+        let root = fs::canonicalize(root).map_err(fail)?;
+        if !root.is_dir() {
+            return Err(fail("Root path is not a folder"));
+        }
+        let mut children = fs::read_dir(&root)
+            .map_err(fail)?
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(fail)?;
+        children.sort_by_key(|e| e.file_name());
+        let mut candidates = Vec::new();
+        for entry in children {
+            if !entry.file_type().map_err(fail)?.is_file() {
+                continue;
+            }
+            let file_name = entry.file_name();
+            let Some(name_str) = file_name.to_str() else {
+                continue;
+            };
+            if name_str == ".simple-note.json" || name_str.ends_with(".simple-note.json") {
+                continue;
+            }
+            let sidecar = root.join(format!("{name_str}.simple-note.json"));
+            if fs::symlink_metadata(&sidecar)
+                .map(|m| m.is_file())
+                .unwrap_or(false)
+            {
+                candidates.push((entry.path(), sidecar));
+            }
+        }
+        let mut migrated = std::collections::BTreeMap::new();
+        let mut copied_assets = std::collections::BTreeSet::new();
+        for (p, sidecar) in candidates {
+            let old_doc = load(&p)?;
+            validate_metadata(&old_doc.metadata)?;
+            let (stem, ext) = sanitize_stem_ext(p.file_name().and_then(|n| n.to_str()))?;
+            let chosen_stem = if not_present(&root.join(&stem))? {
+                stem
+            } else {
+                let base = strip_numeric_suffix(&stem);
+                let mut found = None;
+                for n in 1..=100_000 {
+                    let candidate = format!("{base}-{n}");
+                    if not_present(&root.join(&candidate))?
+                        && is_stem_available_in_root(&root, &candidate, &ext)?
+                    {
+                        found = Some(candidate);
+                        break;
+                    }
+                }
+                found.ok_or_else(|| fail("Too many notes with that name in root folder"))?
+            };
+            let folder = root.join(&chosen_stem);
+            let new_file_name = format!("{chosen_stem}.{ext}");
+            let stage = tempfile::tempdir_in(&root).map_err(fail)?;
+            let stage_assets = stage.path().join("assets");
+            fs::create_dir(&stage_assets).map_err(fail)?;
+            let mut asset_refs = std::collections::BTreeSet::new();
+            if let Some(images) = old_doc.metadata.get("images").and_then(Value::as_object) {
+                for key in images.keys() {
+                    if !key.starts_with("recovery:") {
+                        asset_refs.insert(key.clone());
+                    }
+                }
+            }
+            for (idx, _) in old_doc.text.match_indices("./assets/") {
+                let rest = &old_doc.text[idx..];
+                let end = rest
+                    .find(|c: char| {
+                        c.is_whitespace() || matches!(c, ')' | ']' | '"' | '\'' | '<' | '>' | ';')
+                    })
+                    .unwrap_or(rest.len());
+                if end > "./assets/".len() {
+                    asset_refs.insert(rest[..end].to_owned());
+                }
+            }
+            for rel in asset_refs {
+                if let Ok(orig_asset) = asset_path(&root, &rel)
+                    && orig_asset.is_file()
+                {
+                    let bytes = read(&orig_asset, 20 * 1024 * 1024)?;
+                    validate_image(&bytes)?;
+                    if let Some(fname) = orig_asset.file_name() {
+                        let target = stage_assets.join(fname);
+                        if !target.exists() {
+                            atomic_noclobber(&target, &bytes)?;
+                        }
+                        copied_assets.insert(orig_asset);
+                    }
+                }
+            }
+            let mut meta = old_doc.metadata.clone();
+            if let Some(obj) = meta.as_object_mut() {
+                obj.insert("main".into(), json!(new_file_name));
+            }
+            atomic_noclobber(&stage.path().join(&new_file_name), old_doc.text.as_bytes())?;
+            atomic_noclobber(
+                &stage.path().join(".simple-note.json"),
+                &serde_json::to_vec_pretty(&meta).map_err(fail)?,
+            )?;
+            fs::rename(stage.path(), &folder).map_err(fail)?;
+            fs::remove_file(&p).map_err(fail)?;
+            fs::remove_file(&sidecar).map_err(fail)?;
+            let new_doc = load(&folder.join(&new_file_name))?;
+            migrated.insert(old_doc.path, new_doc.path);
+        }
+        if !copied_assets.is_empty() {
+            let mut remaining_texts = Vec::new();
+            for entry in fs::read_dir(&root).map_err(fail)? {
+                let entry = entry.map_err(fail)?;
+                if entry.file_type().map_err(fail)?.is_file()
+                    && let Ok(content) = text(&entry.path())
+                {
+                    remaining_texts.push(content);
+                }
+            }
+            for asset in copied_assets {
+                let fname = asset.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let referenced =
+                    !fname.is_empty() && remaining_texts.iter().any(|t| t.contains(fname));
+                if !referenced {
+                    let _ = fs::remove_file(&asset);
+                }
+            }
+            let root_assets = root.join("assets");
+            if root_assets.is_dir() {
+                let _ = fs::remove_dir(root_assets);
+            }
+        }
+        Ok(migrated)
     }
     fn snapshot(&self, snapshot: &str) -> Result<()> {
         if snapshot.len() > 64 * 1024 * 1024 {
@@ -722,6 +925,9 @@ pub enum Operation {
         path: String,
         name: String,
     },
+    MigrateRoot {
+        root: String,
+    },
     Recover,
     Snapshot {
         snapshot: String,
@@ -738,6 +944,53 @@ pub enum Operation {
         root: String,
         query: String,
     },
+}
+fn package_main(dir: &Path) -> Option<String> {
+    let pkg = dir.join(".simple-note.json");
+    if !fs::symlink_metadata(&pkg)
+        .map(|m| m.is_file())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let raw = text(&pkg).ok()?;
+    let val: Value = serde_json::from_str(&raw).ok()?;
+    let main = val.get("main")?.as_str()?;
+    if main.is_empty()
+        || main.contains(['/', '\\'])
+        || main == ".simple-note.json"
+        || main.ends_with(".simple-note.json")
+    {
+        return None;
+    }
+    if !fs::symlink_metadata(dir.join(main))
+        .map(|m| m.is_file())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let entries = fs::read_dir(dir).ok()?;
+    for entry in entries {
+        let entry = entry.ok()?;
+        let kind = entry.file_type().ok()?;
+        if kind.is_symlink() {
+            return None;
+        }
+        let name = entry.file_name();
+        let name_str = name.to_str()?;
+        if kind.is_dir() {
+            if !matches!(name_str, "assets" | ".git" | "node_modules" | "target") {
+                return None;
+            }
+        } else if kind.is_file()
+            && name_str != main
+            && name_str != ".simple-note.json"
+            && !name_str.ends_with(".simple-note.json")
+        {
+            return None;
+        }
+    }
+    Some(main.to_owned())
 }
 fn browse(root: &Path, query: &str) -> Result<Value> {
     fn visit(
@@ -781,6 +1034,48 @@ fn browse(root: &Path, query: &str) -> Result<Value> {
                     entry.file_name().to_str(),
                     Some(".git" | "node_modules" | "target" | "assets")
                 ) {
+                    continue;
+                }
+                if let Some(main_name) = package_main(&p) {
+                    let main_path = p.join(&main_name);
+                    let main_relative = main_path
+                        .strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    *visited += 1;
+                    if *visited > 20000 {
+                        return Err(fail("Folder exceeds 20,000 entries; open a smaller folder"));
+                    }
+                    if query.is_empty() {
+                        entries.push(json!({
+                            "path": main_path,
+                            "relative": main_relative,
+                            "directory": false,
+                            "package": true
+                        }));
+                    } else if let Ok(source) = text(&main_path) {
+                        if source.contains('\0') {
+                            continue;
+                        }
+                        for (index, line) in source.lines().enumerate() {
+                            if line.to_lowercase().contains(&query.to_lowercase()) {
+                                entries.push(json!({
+                                    "path": main_path,
+                                    "relative": main_relative,
+                                    "directory": false,
+                                    "package": true,
+                                    "line": index + 1,
+                                    "preview": line.chars().take(240).collect::<String>()
+                                }));
+                                if entries.len() >= 10000 {
+                                    return Err(fail(
+                                        "Search exceeds 10,000 results; narrow the query",
+                                    ));
+                                }
+                            }
+                        }
+                    }
                     continue;
                 }
                 if query.is_empty() {
@@ -881,6 +1176,7 @@ pub async fn file_operation(
                 Path::new(&path),
                 &name
             )?)),
+            Operation::MigrateRoot { root } => Ok(json!(store.migrate_root(Path::new(&root))?)),
             Operation::Recover => {
                 let p = recovery.join("session.json");
                 if !p.exists() {
@@ -1238,9 +1534,12 @@ mod tests {
             )
             .unwrap();
         assert_eq!(first.text, "First note\n![image](./assets/a.png)\n");
-        assert!(root.join("Untitled-1.md").exists());
-        assert!(root.join("Untitled-1.md.simple-note.json").exists());
-        assert!(root.join("assets/a.png").exists());
+        assert!(!root.join("Untitled-1.md").exists());
+        assert!(!root.join("assets").exists());
+        assert!(root.join("Untitled-1/Untitled-1.md").exists());
+        assert!(root.join("Untitled-1/.simple-note.json").exists());
+        assert!(root.join("Untitled-1/assets/a.png").exists());
+        assert_eq!(first.metadata["main"], "Untitled-1.md");
         let empty = json!({"version":1,"images":{}});
         let second = store
             .create_in_root(
@@ -1252,20 +1551,29 @@ mod tests {
                 &[],
             )
             .unwrap();
-        assert!(root.join("Untitled-2.md").exists());
+        assert!(root.join("Untitled-2/Untitled-2.md").exists());
+        assert!(root.join("Untitled-2/.simple-note.json").exists());
+        assert!(root.join("Untitled-2/assets").is_dir());
         assert_eq!(second.text, "Second note");
         assert_eq!(
-            text(&root.join("Untitled-1.md")).unwrap(),
+            text(&root.join("Untitled-1/Untitled-1.md")).unwrap(),
             "First note\n![image](./assets/a.png)\n"
         );
         let listed = browse(&root, "").unwrap();
-        let relatives: Vec<_> = listed
-            .as_array()
-            .unwrap()
+        let items = listed.as_array().unwrap();
+        let relatives: Vec<_> = items
             .iter()
             .map(|e| e["relative"].as_str().unwrap().to_owned())
             .collect();
-        assert_eq!(relatives, vec!["Untitled-1.md", "Untitled-2.md"]);
+        assert_eq!(
+            relatives,
+            vec!["Untitled-1/Untitled-1.md", "Untitled-2/Untitled-2.md"]
+        );
+        assert!(
+            items
+                .iter()
+                .all(|e| e["directory"] == false && e["package"] == true)
+        );
     }
     #[test]
     fn rename_stays_within_root_moves_sidecar_and_refuses_collisions() {
@@ -1275,21 +1583,33 @@ mod tests {
         fs::create_dir(&root).unwrap();
         fs::write(&outside, "outside").unwrap();
         let store = FileStore::new(dir.path().join("app")).unwrap();
-        let empty = json!({"version":1,"images":{}});
+        let image = png();
+        fs::write(store.recovery.join("assets/a.png"), &image).unwrap();
+        let rec_path = "recovery:assets/a.png";
+        let source = format!("hello\n![image]({rec_path})\n");
         let doc = store
-            .create_in_root(&root, Some("Untitled-1.md"), "hello", &empty, None, &[])
+            .create_in_root(
+                &root,
+                Some("Untitled-1.md"),
+                &source,
+                &metadata(rec_path),
+                None,
+                &[reference(&source, rec_path)],
+            )
             .unwrap();
+        let empty = json!({"version":1,"images":{}});
         store
             .create_in_root(&root, Some("taken.md"), "taken", &empty, None, &[])
             .unwrap();
         let renamed = store
             .rename(&root, Path::new(&doc.path), "sample.md")
             .unwrap();
-        assert!(!root.join("Untitled-1.md").exists());
-        assert!(!root.join("Untitled-1.md.simple-note.json").exists());
-        assert!(root.join("sample.md").exists());
-        assert!(root.join("sample.md.simple-note.json").exists());
-        assert_eq!(renamed.text, "hello");
+        assert!(!root.join("Untitled-1").exists());
+        assert!(root.join("sample/sample.md").exists());
+        assert!(root.join("sample/.simple-note.json").exists());
+        assert!(root.join("sample/assets/a.png").exists());
+        assert_eq!(renamed.metadata["main"], "sample.md");
+        assert_eq!(renamed.text, "hello\n![image](./assets/a.png)\n");
         assert!(
             store
                 .rename(&root, Path::new(&renamed.path), "../escape.md")
@@ -1300,6 +1620,65 @@ mod tests {
                 .rename(&root, Path::new(&renamed.path), "taken.md")
                 .is_err()
         );
+        assert!(
+            store
+                .rename(&root, Path::new(&renamed.path), "assets.md")
+                .is_err()
+        );
         assert!(store.rename(&root, &outside, "hijack.md").is_err());
+    }
+    #[test]
+    fn migrate_root_packages_flat_notes_and_isolates_assets_without_touching_plain_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("workspace");
+        fs::create_dir_all(root.join("assets")).unwrap();
+        let image = png();
+        fs::write(root.join("assets/pic.png"), &image).unwrap();
+        let store = FileStore::new(dir.path().join("app")).unwrap();
+        let md = "Note one\n![image](./assets/pic.png)\n";
+        fs::write(root.join("sample.md"), md).unwrap();
+        fs::write(
+            root.join("sample.md.simple-note.json"),
+            serde_json::to_vec_pretty(&metadata("./assets/pic.png")).unwrap(),
+        )
+        .unwrap();
+        fs::write(root.join("Untitled-2.md"), "draft").unwrap();
+        fs::write(
+            root.join("Untitled-2.md.simple-note.json"),
+            serde_json::to_vec_pretty(&json!({"version":1,"images":{}})).unwrap(),
+        )
+        .unwrap();
+        fs::write(root.join("README.txt"), "keep me plain").unwrap();
+
+        let moved = store.migrate_root(&root).unwrap();
+        assert_eq!(moved.len(), 2);
+        assert!(root.join("sample/sample.md").exists());
+        assert!(root.join("sample/.simple-note.json").exists());
+        assert!(root.join("sample/assets/pic.png").exists());
+        assert_eq!(
+            serde_json::from_str::<Value>(&text(&root.join("sample/.simple-note.json")).unwrap())
+                .unwrap()["main"],
+            "sample.md"
+        );
+        assert!(root.join("Untitled-2/Untitled-2.md").exists());
+        assert!(root.join("Untitled-2/.simple-note.json").exists());
+        assert!(root.join("Untitled-2/assets").is_dir());
+        assert!(!root.join("sample.md").exists());
+        assert!(!root.join("sample.md.simple-note.json").exists());
+        assert!(!root.join("Untitled-2.md").exists());
+        assert!(!root.join("Untitled-2.md.simple-note.json").exists());
+        assert!(!root.join("assets").exists());
+        assert_eq!(text(&root.join("README.txt")).unwrap(), "keep me plain");
+
+        let reopened = load(&root.join("sample/sample.md")).unwrap();
+        assert_eq!(reopened.text, md);
+        assert_eq!(
+            read(
+                &asset_path(&root.join("sample"), "./assets/pic.png").unwrap(),
+                20 * 1024 * 1024
+            )
+            .unwrap(),
+            image
+        );
     }
 }

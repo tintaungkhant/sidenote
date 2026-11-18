@@ -5,7 +5,7 @@ export type Metadata = { version: 1; main?: string; images: Record<string, { id:
 export type DiskDocument = { path: string; text: string; metadata: Metadata; revision: string };
 export type Buffer = { id: string; path: string | null; name?: string; text: string; metadata: Metadata; baseline: string; revision: string; external: 'changed' | 'deleted' | 'unavailable' | null; anchor: number; head: number; scrollTop: number; pinned: boolean };
 export type Workspace = { version: 1; buffers: Buffer[]; active: string | null; root: string | null; wrap: boolean; sidebar: boolean };
-export type Entry = { path: string; relative: string; directory: boolean; line?: number; preview?: string };
+export type Entry = { path: string; relative: string; directory: boolean; package?: boolean; line?: number; preview?: string };
 export type SearchMatch = { key: string; bufferId?: string; path?: string; label: string; line: number; preview: string; unsaved: boolean };
 export function languageFor(path: string | null): Language {
   return ({ md: 'markdown', markdown: 'markdown', js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript', ts: 'typescript', tsx: 'typescript', php: 'php', html: 'html', htm: 'html', css: 'css', json: 'json' } as Record<string, Language>)[path?.split('.').at(-1)?.toLowerCase() ?? ''] ?? 'plaintext';
@@ -23,7 +23,7 @@ export function preferredFileName(buffer: Pick<Buffer, 'path' | 'name'>): string
   const raw = (buffer.path?.split(/[/\\]/).at(-1) ?? buffer.name ?? 'Untitled-1').trim() || 'Untitled-1';
   return raw.includes('.') ? raw : `${raw}.md`;
 }
-export function nextUntitledName(buffers: readonly Pick<Buffer, 'path' | 'name'>[], entries: readonly Pick<Entry, 'relative' | 'directory'>[] = []): string {
+export function nextUntitledName(buffers: readonly Pick<Buffer, 'path' | 'name'>[], entries: readonly Pick<Entry, 'relative' | 'directory' | 'package'>[] = []): string {
   const taken = new Set<number>();
   const record = (raw: string | undefined) => {
     if (!raw) return;
@@ -31,8 +31,12 @@ export function nextUntitledName(buffers: readonly Pick<Buffer, 'path' | 'name'>
     const match = /^untitled-(\d+)(?:\.[^.]+)?$/i.exec(base.trim());
     if (match) taken.add(Number(match[1]));
   };
-  for (const b of buffers) { record(b.path ?? undefined); record(b.name); }
-  for (const e of entries) if (!e.directory && !e.relative.includes('/')) record(e.relative);
+  for (const b of buffers) {
+    record(b.path ?? undefined);
+    if (b.path) record(b.path.split(/[/\\]/).at(-2));
+    record(b.name);
+  }
+  for (const e of entries) record(e.relative.split('/')[0]);
   let n = 1;
   while (taken.has(n)) n += 1;
   return `Untitled-${n}`;
@@ -91,11 +95,39 @@ export function validateFileName(raw: string, fallbackExt = 'md'): string {
   if (!stem || !ext || stem.endsWith(' ') || stem.endsWith('.')) {
     throw new Error('Invalid file name.');
   }
+  if (/^(\.git|node_modules|target|assets)$/i.test(stem)) {
+    throw new Error('That name is reserved.');
+  }
   const base = stem.split('.')[0].trimEnd().toUpperCase();
   if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(base)) {
     throw new Error('That file name is reserved by the operating system.');
   }
   return `${stem}.${ext}`;
+}
+function stemOf(name: string): string {
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? name.slice(0, dot) : name;
+}
+export function compactNotePath(relative: string): string {
+  const parts = relative.split('/').filter(Boolean);
+  if (parts.length >= 2 && parts.at(-2)!.toLowerCase() === stemOf(parts.at(-1)!).toLowerCase()) {
+    return [...parts.slice(0, -2), parts.at(-1)!].join('/');
+  }
+  return relative;
+}
+export function entryDepth(entry: Pick<Entry, 'relative' | 'package'>): number {
+  return Math.max(0, entry.relative.split('/').length - (entry.package ? 2 : 1));
+}
+export function entryLabel(entry: Pick<Entry, 'relative' | 'package'>): string {
+  if (entry.package) {
+    const compacted = compactNotePath(entry.relative);
+    const parts = compacted.split('/').filter(Boolean);
+    if (parts.length >= 2 && entry.relative.split('/').length === parts.length) {
+      return `${parts.at(-2)}/${parts.at(-1)}`;
+    }
+    return parts.at(-1) ?? entry.relative;
+  }
+  return entry.relative.split('/').at(-1) ?? entry.relative;
 }
 export function searchWorkspace(query: string, buffers: readonly Buffer[], diskMatches: readonly Entry[], root: string | null): SearchMatch[] {
   if (!query) return [];
@@ -125,7 +157,7 @@ export function searchWorkspace(query: string, buffers: readonly Buffer[], diskM
     if (isUnsavedBuffer(buffer, root) && scanBuffer(buffer, true, title(buffer))) return results;
   }
   for (const buffer of buffers) {
-    if (!isUnsavedBuffer(buffer, root) && buffer.path && scanBuffer(buffer, false, relativeToRoot(buffer.path, root))) return results;
+    if (!isUnsavedBuffer(buffer, root) && buffer.path && scanBuffer(buffer, false, compactNotePath(relativeToRoot(buffer.path, root)))) return results;
   }
   for (const entry of diskMatches) {
     if (entry.directory || entry.line === undefined) continue;
@@ -133,7 +165,7 @@ export function searchWorkspace(query: string, buffers: readonly Buffer[], diskM
     results.push({
       key: `disk:${entry.path}:${entry.line}`,
       path: entry.path,
-      label: entry.relative,
+      label: compactNotePath(entry.relative),
       line: entry.line,
       preview: entry.preview ?? '',
       unsaved: false,

@@ -170,10 +170,41 @@
     workspace = { ...workspace, root: nextRoot, buffers: retained, active: nextActive };
     mount(nextActive);
   }
+  async function migrateWorkspaceRoot(rootPath: string) {
+    const migrated = await files.operation<Record<string, string>>({ kind: 'migrateRoot', root: rootPath });
+    const pairs = Object.entries(migrated);
+    if (!pairs.length) return;
+    capture();
+    for (const [oldPath, newPath] of pairs) {
+      const match = workspace.buffers.find(b => b.path && files.samePath(b.path, oldPath));
+      if (!match) continue;
+      const wasDirty = files.modified(match);
+      const disk = await files.readFile(newPath);
+      if (!wasDirty) {
+        patch(match.id, { ...disk, baseline: files.fingerprint(disk.text, disk.metadata), external: null });
+        if (viewId === match.id && view) view.dispatch({ effects: setMetadata.of(disk.metadata) });
+        else states.delete(match.id);
+      } else {
+        const withoutMain: files.Metadata = { version: disk.metadata.version, images: disk.metadata.images };
+        const sameBase = files.fingerprint(disk.text, withoutMain) === match.baseline;
+        const nextMeta = { ...match.metadata, ...(disk.metadata.main ? { main: disk.metadata.main } : {}) };
+        patch(match.id, {
+          path: disk.path,
+          revision: disk.revision,
+          metadata: nextMeta,
+          baseline: files.fingerprint(disk.text, disk.metadata),
+          external: sameBase ? null : 'changed',
+        });
+        if (viewId === match.id && view) view.dispatch({ effects: setMetadata.of(nextMeta) });
+        else if (states.has(match.id)) states.set(match.id, states.get(match.id)!.update({ effects: setMetadata.of(nextMeta) }).state);
+      }
+    }
+  }
   async function setRootFolder() {
     const root = await files.picker('folder');
     if (!root) return;
     applyRootFolder(root);
+    await migrateWorkspaceRoot(root);
     workspace = { ...workspace, sidebar: true };
     await refresh();
     await checkpoint();
@@ -194,6 +225,7 @@
       const picked = await files.picker('folder');
       if (!picked) return false;
       applyRootFolder(picked, buffer.id);
+      await migrateWorkspaceRoot(picked);
       rootPath = picked;
     }
     const current = workspace.buffers.find(b => b.id === id);
@@ -291,6 +323,9 @@
         const oldLanguage = files.bufferLanguage(buffer);
         const newLanguage = files.languageFor(disk.path);
         const dirty = files.modified(buffer);
+        const nextMetadata = dirty
+          ? { ...buffer.metadata, ...(disk.metadata.main ? { main: disk.metadata.main } : {}) }
+          : disk.metadata;
         if (oldLanguage !== newLanguage) {
           if (viewId === buffer.id) unmount();
           states.delete(buffer.id);
@@ -299,8 +334,13 @@
           path: disk.path,
           revision: disk.revision,
           name: undefined,
-          ...(dirty ? {} : { text: disk.text, metadata: disk.metadata, baseline: files.fingerprint(disk.text, disk.metadata), external: null }),
+          metadata: nextMetadata,
+          ...(dirty ? {} : { text: disk.text, baseline: files.fingerprint(disk.text, disk.metadata), external: null }),
         });
+        if (oldLanguage === newLanguage) {
+          if (viewId === buffer.id && view) view.dispatch({ effects: setMetadata.of(nextMetadata) });
+          else if (states.has(buffer.id)) states.set(buffer.id, states.get(buffer.id)!.update({ effects: setMetadata.of(nextMetadata) }).state);
+        }
         if (oldLanguage !== newLanguage && workspace.active === buffer.id) mount(buffer.id);
         renamingId = null;
         await refresh();
@@ -525,6 +565,9 @@
       if (disposed) return;
       if (recovered) {
         workspace = files.recovered(recovered);
+        if (workspace.root) {
+          try { await migrateWorkspaceRoot(workspace.root); } catch (error) { notice = errorMessage(error); }
+        }
         for (const buffer of [...workspace.buffers]) {
           if (!buffer.path) continue;
           try { patch(buffer.id,files.reconcile(buffer,await files.readFile(buffer.path))); }
@@ -642,11 +685,11 @@
               class:current={Boolean(active?.path && files.samePath(active.path, entry.path))}
               title={files.displayPath(entry.path)}
               disabled={entry.directory}
-              style:padding-left={`${12 + (entry.relative.split('/').length - 1) * 12}px`}
+              style:padding-left={`${12 + files.entryDepth(entry) * 12}px`}
               onclick={() => run(() => openRootFile(entry.path))}
             >
               <span>{entry.directory ? '▾' : '·'}</span>
-              <span class="file-name">{entry.relative.split('/').at(-1)}{openBuffer && files.modified(openBuffer) ? ' ●' : ''}</span>
+              <span class="file-name">{files.entryLabel(entry)}{openBuffer && files.modified(openBuffer) ? ' ●' : ''}</span>
             </button>
           {/each}
         {/if}

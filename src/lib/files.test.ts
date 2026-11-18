@@ -2,7 +2,7 @@ import { test, expect } from 'bun:test';
 import {
   untitled, opened, modified, closeDecision, fingerprint, reconcile, removeBuffer, languageFor, recovered,
   nextUntitledName, withinRoot, samePath, relativeToRoot, displayPath, searchWorkspace, bufferLanguage,
-  preferredFileName, validateFileName, type Workspace
+  preferredFileName, validateFileName, compactNotePath, entryDepth, entryLabel, type Workspace
 } from './files';
 
 test('Untitled, explicit save acknowledgement, modification, close and cancellation decisions', () => {
@@ -59,6 +59,7 @@ test('recovery rejects malformed or duplicate buffers and preserves the clean ba
 test('nextUntitledName skips taken open tabs and root files', () => {
   expect(nextUntitledName([])).toBe('Untitled-1');
   expect(nextUntitledName([untitled('Untitled-1')], [{ relative: 'Untitled-2.md', directory: false }, { relative: 'sub/Untitled-3.md', directory: false }])).toBe('Untitled-3');
+  expect(nextUntitledName([untitled('Untitled-1')], [{ relative: 'Untitled-2/Untitled-2.md', directory: false, package: true }])).toBe('Untitled-3');
   expect(nextUntitledName([{ path: 'C:\\notes\\Untitled-1.md', name: undefined }])).toBe('Untitled-2');
 });
 test('Windows verbatim and prefix paths compare accurately in withinRoot, samePath, and relativeToRoot', () => {
@@ -71,11 +72,12 @@ test('Windows verbatim and prefix paths compare accurately in withinRoot, samePa
 });
 test('searchWorkspace searches unsaved buffers without root and prefers live open buffers over stale disk entries', () => {
   const draft = { ...untitled('Draft-1'), text: 'line one\nTODO: unsaved note' };
-  const openSaved = opened({ path: '\\\\?\\C:\\notes\\open.md', text: 'disk text', metadata: untitled().metadata, revision: '1' });
+  const openSaved = opened({ path: '\\\\?\\C:\\notes\\note-a\\note-a.md', text: 'disk text', metadata: untitled().metadata, revision: '1' });
   openSaved.text = 'updated TODO in open buffer';
   const diskMatches = [
-    { path: 'C:\\notes\\open.md', relative: 'open.md', directory: false, line: 1, preview: 'TODO: stale disk line' },
-    { path: 'C:\\notes\\other.md', relative: 'other.md', directory: false, line: 4, preview: 'TODO: on disk only' },
+    { path: 'C:\\notes\\note-a\\note-a.md', relative: 'note-a/note-a.md', directory: false, package: true, line: 1, preview: 'TODO: stale disk line' },
+    { path: 'C:\\notes\\note-b\\note-b.md', relative: 'note-b/note-b.md', directory: false, package: true, line: 2, preview: 'TODO: in note-b' },
+    { path: 'C:\\notes\\sub\\other.md', relative: 'sub/other.md', directory: false, line: 4, preview: 'TODO: on disk only' },
   ];
   expect(searchWorkspace('', [draft], diskMatches, null)).toEqual([]);
   const noRoot = searchWorkspace('todo', [draft], [], null);
@@ -84,11 +86,12 @@ test('searchWorkspace searches unsaved buffers without root and prefers live ope
   const withRoot = searchWorkspace('todo', [draft, openSaved], diskMatches, 'C:\\notes');
   expect(withRoot.map(m => ({ label: m.label, line: m.line, preview: m.preview, unsaved: m.unsaved }))).toEqual([
     { label: 'Draft-1', line: 2, preview: 'TODO: unsaved note', unsaved: true },
-    { label: 'open.md', line: 1, preview: 'updated TODO in open buffer', unsaved: false },
-    { label: 'other.md', line: 4, preview: 'TODO: on disk only', unsaved: false },
+    { label: 'note-a.md', line: 1, preview: 'updated TODO in open buffer', unsaved: false },
+    { label: 'note-b.md', line: 2, preview: 'TODO: in note-b', unsaved: false },
+    { label: 'sub/other.md', line: 4, preview: 'TODO: on disk only', unsaved: false },
   ]);
 });
-test('bufferLanguage, preferredFileName, and validateFileName handle unsaved and typed extensions', () => {
+test('bufferLanguage, preferredFileName, validateFileName, and package display helpers handle package layouts', () => {
   expect(bufferLanguage({ path: null, name: 'Untitled-1' })).toBe('markdown');
   expect(bufferLanguage({ path: null, name: 'scratch.ts' })).toBe('typescript');
   expect(bufferLanguage({ path: '/root/a.json', name: undefined })).toBe('json');
@@ -99,6 +102,18 @@ test('bufferLanguage, preferredFileName, and validateFileName handle unsaved and
   expect(validateFileName('custom.json', 'md')).toBe('custom.json');
   expect(() => validateFileName('.simple-note.json')).toThrow();
   expect(() => validateFileName('foo.simple-note.json')).toThrow();
+  expect(() => validateFileName('assets.md')).toThrow();
+  expect(() => validateFileName('assets')).toThrow();
   expect(() => validateFileName('../escape.md')).toThrow();
   expect(() => validateFileName('CON.md')).toThrow();
+  expect(compactNotePath('note-a/note-a.md')).toBe('note-a.md');
+  expect(compactNotePath('work/note-a/note-a.md')).toBe('work/note-a.md');
+  expect(compactNotePath('sub/other.md')).toBe('sub/other.md');
+  expect(entryDepth({ relative: 'note-a/note-a.md', package: true })).toBe(0);
+  expect(entryDepth({ relative: 'work/note-a/note-a.md', package: true })).toBe(1);
+  expect(entryDepth({ relative: 'sub/other.md', package: false })).toBe(1);
+  expect(entryLabel({ relative: 'note-a/note-a.md', package: true })).toBe('note-a.md');
+  expect(entryLabel({ relative: 'work/note-a/note-a.md', package: true })).toBe('note-a.md');
+  expect(entryLabel({ relative: 'folder-a/other.md', package: true })).toBe('folder-a/other.md');
+  expect(entryLabel({ relative: 'sub/other.md', package: false })).toBe('other.md');
 });
