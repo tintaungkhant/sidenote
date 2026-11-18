@@ -1,6 +1,7 @@
 /** Browser-only image presentation; callers provide local attachment sources. */
-import { Decoration, EditorView, WidgetType, type DecorationSet } from '@codemirror/view';
-import { StateField, type EditorState } from '@codemirror/state';
+import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from '@codemirror/view';
+import { RangeSetBuilder, StateField, type EditorState } from '@codemirror/state';
+import { getSearchQuery } from '@codemirror/search';
 import { HighlightStyle, syntaxHighlighting, syntaxTree } from '@codemirror/language';
 import { tags } from '@lezer/highlight';
 import { imageField, selectionText } from './state';
@@ -107,6 +108,51 @@ class ImageWidget extends WidgetType {
   destroy(dom: HTMLElement): void { this.releases.get(dom)?.(); this.releases.delete(dom); }
 }
 
+const searchMatchMark = Decoration.mark({ class: 'cm-note-match' });
+const activeSearchMatchMark = Decoration.mark({ class: 'cm-note-match cm-note-match-active' });
+
+export function buildSearchDecorations(state: EditorState, ranges: readonly { from: number; to: number }[]): DecorationSet {
+  const query = getSearchQuery(state);
+  if (!query.valid) return Decoration.none;
+  const builder = new RangeSetBuilder<Decoration>();
+  const sel = state.selection.main;
+  let lastTo = -1;
+  for (let i = 0; i < ranges.length; i++) {
+    let { from, to } = ranges[i];
+    while (i < ranges.length - 1 && to > ranges[i + 1].from - 500) {
+      to = ranges[++i].to;
+    }
+    const start = Math.max(0, from - 250);
+    const end = Math.min(state.doc.length, to + 250);
+    const cursor = query.getCursor(state, start, end);
+    for (let step = cursor.next(); !step.done; step = cursor.next()) {
+      const { from: mFrom, to: mTo } = step.value;
+      if (mFrom >= mTo || mFrom < lastTo) continue;
+      const isSelected = sel.from === mFrom && sel.to === mTo;
+      builder.add(mFrom, mTo, isSelected ? activeSearchMatchMark : searchMatchMark);
+      lastTo = mTo;
+    }
+  }
+  return builder.finish();
+}
+
+export const searchMatchHighlighter = ViewPlugin.fromClass(class {
+  decorations: DecorationSet;
+  constructor(view: EditorView) {
+    this.decorations = buildSearchDecorations(view.state, view.visibleRanges);
+  }
+  update(update: ViewUpdate) {
+    if (
+      !getSearchQuery(update.state).eq(getSearchQuery(update.startState)) ||
+      update.docChanged ||
+      update.selectionSet ||
+      update.viewportChanged
+    ) {
+      this.decorations = buildSearchDecorations(update.state, update.view.visibleRanges);
+    }
+  }
+}, { decorations: v => v.decorations });
+
 /** Decorate sidecar positions only, preserving literal placeholder characters. */
 export function imagePresentation(load: (id: AttachmentId) => Promise<Blob>, open: (block: ImageBlock) => void = () => {}) {
   return [
@@ -136,6 +182,10 @@ export function imagePresentation(load: (id: AttachmentId) => Promise<Blob>, ope
       '.cm-cursor': { borderLeft: '2px solid #38bdf8' },
       '&.cm-focused .cm-selectionBackground, .cm-selectionBackground': { backgroundColor: 'rgba(99, 102, 241, 0.3)' },
       '&.cm-focused .cm-matchingBracket': { outline: '1px solid #38bdf8', backgroundColor: 'rgba(56, 189, 248, 0.15)' },
+      '.cm-note-match': { backgroundColor: 'rgba(234, 179, 8, 0.45)', color: '#fef08a !important', boxShadow: 'inset 0 0 0 1px rgba(250, 204, 21, 0.7)', borderRadius: '2px' },
+      '.cm-note-match *': { color: '#fef08a !important' },
+      '.cm-note-match.cm-note-match-active': { backgroundColor: 'rgba(249, 115, 22, 0.88)', color: '#ffffff !important', boxShadow: '0 0 0 1px #fbbf24', borderRadius: '2px' },
+      '.cm-note-match.cm-note-match-active *': { color: '#ffffff !important' },
       '.note-image-button': { position: 'relative', display: 'inline-block', width: '320px', maxWidth: '100%', padding: '0', border: '1px solid #282a35', borderRadius: '8px', overflow: 'hidden', margin: '8px 0', verticalAlign: 'middle', lineHeight: '0', backgroundColor: '#181920', boxShadow: '0 4px 20px rgba(0,0,0,0.3)', transition: 'all 0.15s ease', cursor: 'pointer' },
       '.note-image-button:hover': { borderColor: '#6366f1', boxShadow: '0 6px 24px rgba(99, 102, 241, 0.25)' },
       '.note-image-block': { display: 'flow-root', padding: '8px 0' },
@@ -162,5 +212,5 @@ export function referencePresentation(language: Language, load: (id: AttachmentI
     },
     provide: field => EditorView.decorations.from(field)
   });
-  return [legacy[2], previews];
+  return [legacy[2], previews, searchMatchHighlighter];
 }

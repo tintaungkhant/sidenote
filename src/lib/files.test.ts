@@ -2,7 +2,7 @@ import { test, expect } from 'bun:test';
 import {
   untitled, opened, modified, closeDecision, fingerprint, reconcile, removeBuffer, languageFor, recovered,
   nextUntitledName, withinRoot, samePath, relativeToRoot, displayPath, searchWorkspace, bufferLanguage,
-  preferredFileName, validateFileName, compactNotePath, entryDepth, entryLabel, type Workspace
+  preferredFileName, validateFileName, compactNotePath, entryDepth, entryLabel, highlightText, groupSearchMatches, type Workspace
 } from './files';
 
 test('Untitled, explicit save acknowledgement, modification, close and cancellation decisions', () => {
@@ -116,4 +116,35 @@ test('bufferLanguage, preferredFileName, validateFileName, and package display h
   expect(entryLabel({ relative: 'work/note-a/note-a.md', package: true })).toBe('note-a.md');
   expect(entryLabel({ relative: 'folder-a/other.md', package: true })).toBe('folder-a/other.md');
   expect(entryLabel({ relative: 'sub/other.md', package: false })).toBe('other.md');
+});
+test('highlightText splits case-insensitive matches safely and groupSearchMatches groups per file', () => {
+  expect(highlightText('   const Foo = foo + bar', 'foo')).toEqual([
+    { text: 'const ', match: false },
+    { text: 'Foo', match: true },
+    { text: ' = ', match: false },
+    { text: 'foo', match: true },
+    { text: ' + bar', match: false },
+  ]);
+  expect(highlightText('see [image:a.png] end', '[image:a.png]')).toEqual([
+    { text: 'see ', match: false },
+    { text: '[image:a.png]', match: true },
+    { text: ' end', match: false },
+  ]);
+  expect(highlightText('   hello', '')).toEqual([{ text: 'hello', match: false }]);
+  expect(highlightText('  padded', '  pad')).toEqual([
+    { text: '  pad', match: true },
+    { text: 'ded', match: false },
+  ]);
+
+  const grouped = groupSearchMatches([
+    { key: 'b1:1', bufferId: 'b1', label: 'Untitled-1', line: 1, preview: 'one', unsaved: true },
+    { key: 'b1:3', bufferId: 'b1', label: 'Untitled-1', line: 3, preview: 'three', unsaved: true },
+    { key: 'd1:2', path: 'C:\\notes\\a\\a.md', label: 'a.md', line: 2, preview: 'disk two', unsaved: false },
+    { key: 'd1:5', path: 'C:/notes/a/a.md', label: 'a.md', line: 5, preview: 'disk five', unsaved: false },
+  ]);
+  expect(grouped).toHaveLength(2);
+  expect(grouped[0]).toMatchObject({ key: 'buf:b1', label: 'Untitled-1', unsaved: true });
+  expect(grouped[0].matches.map(m => m.line)).toEqual([1, 3]);
+  expect(grouped[1]).toMatchObject({ key: 'disk:c:/notes/a/a.md', label: 'a.md', unsaved: false });
+  expect(grouped[1].matches.map(m => m.line)).toEqual([2, 5]);
 });

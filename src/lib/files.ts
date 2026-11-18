@@ -174,6 +174,47 @@ export function searchWorkspace(query: string, buffers: readonly Buffer[], diskM
   }
   return results;
 }
+export type HighlightPart = { text: string; match: boolean };
+export type SearchGroup = { key: string; label: string; path?: string; bufferId?: string; unsaved: boolean; matches: SearchMatch[] };
+export function highlightText(text: string, query: string): HighlightPart[] {
+  const clean = query && query !== query.trimStart() ? text : text.trimStart();
+  if (!clean) return [];
+  if (!query) return [{ text: clean, match: false }];
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const regex = new RegExp(escaped, 'gi');
+  const parts: HighlightPart[] = [];
+  let last = 0;
+  for (const found of clean.matchAll(regex)) {
+    const index = found.index!;
+    if (index > last) parts.push({ text: clean.slice(last, index), match: false });
+    parts.push({ text: found[0], match: true });
+    last = index + found[0].length;
+  }
+  if (last < clean.length) parts.push({ text: clean.slice(last), match: false });
+  return parts;
+}
+export function groupSearchMatches(matches: readonly SearchMatch[]): SearchGroup[] {
+  const groups: SearchGroup[] = [];
+  const byKey = new Map<string, SearchGroup>();
+  for (const match of matches) {
+    const groupKey = match.bufferId ? `buf:${match.bufferId}` : `disk:${normalizePath(match.path ?? match.label).toLowerCase()}`;
+    let group = byKey.get(groupKey);
+    if (!group) {
+      group = {
+        key: groupKey,
+        label: match.label,
+        ...(match.path ? { path: match.path } : {}),
+        ...(match.bufferId ? { bufferId: match.bufferId } : {}),
+        unsaved: match.unsaved,
+        matches: [],
+      };
+      byKey.set(groupKey, group);
+      groups.push(group);
+    }
+    group.matches.push(match);
+  }
+  return groups;
+}
 export function untitled(name?: string): Buffer { const metadata: Metadata = { version: 1, images: {} }; return { id: crypto.randomUUID(), path: null, ...(name !== undefined ? { name } : {}), text: '', metadata, baseline: fingerprint('', metadata), revision: '', external: null, anchor: 0, head: 0, scrollTop: 0, pinned: false }; }
 export function opened(disk: DiskDocument): Buffer { return { ...untitled(), ...disk, baseline: fingerprint(disk.text, disk.metadata) }; }
 export function reconcile(buffer: Buffer, disk: DiskDocument | null): Buffer {

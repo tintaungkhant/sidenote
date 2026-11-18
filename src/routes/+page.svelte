@@ -5,7 +5,7 @@
   import { EditorView, drawSelection, highlightActiveLine, keymap, lineNumbers } from '@codemirror/view';
   import { defaultKeymap, historyKeymap, indentWithTab, undo, redo } from '@codemirror/commands';
   import { bracketMatching, indentOnInput, ensureSyntaxTree } from '@codemirror/language';
-  import { SearchQuery, findNext, search, setSearchQuery } from '@codemirror/search';
+  import { SearchQuery, findNext, findPrevious, search, setSearchQuery } from '@codemirror/search';
   import { javascript } from '@codemirror/lang-javascript';
   import { json } from '@codemirror/lang-json';
   import { html } from '@codemirror/lang-html';
@@ -38,6 +38,8 @@
   let explorerEntries = $state.raw<files.Entry[]>([]);
   let searchEntries = $state.raw<files.Entry[]>([]);
   let searchMatches = $derived(files.searchWorkspace(query, workspace.buffers, searchEntries, workspace.root));
+  let searchGroups = $derived(files.groupSearchMatches(searchMatches));
+  let collapsedGroups = $state.raw<Record<string, boolean>>({});
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
   let renamingTarget = $state<{ kind: 'buffer'; id: string } | { kind: 'path'; path: string } | null>(null), renameValue = $state('');
   let renameInitial = '', renameSubmitting = false;
@@ -111,6 +113,7 @@
     view = new EditorView({ parent: host, state });
     view.dispatch({ effects: [wrapSlot.reconfigure(workspace.wrap ? EditorView.lineWrapping : []), editable.reconfigure(EditorView.editable.of(!frozen && !busy))], selection: { anchor: Math.min(buffer.anchor, state.doc.length), head: Math.min(buffer.head, state.doc.length) } });
     view.scrollDOM.scrollTop = buffer.scrollTop;
+    syncEditorSearch();
     scheduleRecovery();
   }
   function run(work: () => Promise<void> | void) {
@@ -122,10 +125,51 @@
       view?.dispatch({ effects: editable.reconfigure(EditorView.editable.of(!frozen)) });
     });
   }
-  function jumpToLine(line: number) {
+  function activeSearchTerm(): string {
+    if (findVisible) return findQuery;
+    if (workspace.sidebar && panel === 'search') return query;
+    return '';
+  }
+  function syncEditorSearch(jumpFrom?: number) {
+    if (!view) return;
+    const term = activeSearchTerm();
+    const sq = new SearchQuery({ search: term, caseSensitive: false, literal: true });
+    if (jumpFrom !== undefined && term) {
+      const docText = view.state.doc.toString().toLowerCase();
+      const needle = term.toLowerCase();
+      let idx = docText.indexOf(needle, jumpFrom);
+      if (idx < 0 && jumpFrom > 0) idx = docText.indexOf(needle, 0);
+      if (idx >= 0) {
+        view.dispatch({
+          effects: setSearchQuery.of(sq),
+          selection: { anchor: idx, head: idx + term.length },
+          scrollIntoView: true,
+        });
+        return;
+      }
+    }
+    view.dispatch({ effects: setSearchQuery.of(sq) });
+  }
+  function toggleSearchGroup(key: string) {
+    collapsedGroups = { ...collapsedGroups, [key]: !collapsedGroups[key] };
+  }
+  function jumpToLine(line: number, term = activeSearchTerm()) {
     if (!view) return;
     const target = view.state.doc.line(Math.max(1, Math.min(line, view.state.doc.lines)));
-    view.dispatch({ selection: { anchor: target.from }, scrollIntoView: true });
+    const sq = new SearchQuery({ search: term, caseSensitive: false, literal: true });
+    if (term) {
+      const col = target.text.toLowerCase().indexOf(term.toLowerCase());
+      if (col >= 0) {
+        view.dispatch({
+          effects: setSearchQuery.of(sq),
+          selection: { anchor: target.from + col, head: target.from + col + term.length },
+          scrollIntoView: true,
+        });
+        view.focus();
+        return;
+      }
+    }
+    view.dispatch({ effects: setSearchQuery.of(sq), selection: { anchor: target.from }, scrollIntoView: true });
     view.focus();
   }
   async function newFile() {
@@ -494,6 +538,7 @@
   function onSearchInput() {
     capture();
     clearTimeout(searchTimer);
+    syncEditorSearch();
     if (!query || !workspace.root) { searchEntries = []; return; }
     const current = query;
     searchTimer = setTimeout(() => {
@@ -506,6 +551,7 @@
   async function showPanel(next: 'explorer' | 'search') {
     panel = next;
     workspace = { ...workspace, sidebar: true };
+    syncEditorSearch();
     await refresh();
     scheduleRecovery();
     if (next === 'search') {
@@ -514,8 +560,34 @@
     }
   }
   function wrap() { workspace = { ...workspace, wrap: !workspace.wrap }; view?.dispatch({ effects: wrapSlot.reconfigure(workspace.wrap ? EditorView.lineWrapping : []) }); scheduleRecovery(); }
-  async function openFind() { findVisible = true; await tick(); document.getElementById('find')?.focus(); }
-  function find(event: SubmitEvent) { event.preventDefault(); if (view) { view.dispatch({ effects: setSearchQuery.of(new SearchQuery({ search: findQuery, literal: true })) }); findNext(view); } }
+  async function openFind() {
+    findVisible = true;
+    syncEditorSearch();
+    await tick();
+    const input = document.getElementById('find') as HTMLInputElement | null;
+    input?.focus();
+    input?.select();
+  }
+  function onFindInput() {
+    if (!view) return;
+    const from = Math.min(view.state.selection.main.from, view.state.selection.main.to);
+    syncEditorSearch(from);
+  }
+  function stepFind(backwards = false) {
+    if (!view || !findQuery) return;
+    view.dispatch({ effects: setSearchQuery.of(new SearchQuery({ search: findQuery, caseSensitive: false, literal: true })) });
+    if (backwards) findPrevious(view);
+    else findNext(view);
+  }
+  function find(event: SubmitEvent) {
+    event.preventDefault();
+    stepFind(false);
+  }
+  function closeFind() {
+    findVisible = false;
+    syncEditorSearch();
+    view?.focus();
+  }
   async function pasteImage(fallback = '') {
     if (!view || !active) return;
     const target = view, buffer = active, language = files.bufferLanguage(buffer);
@@ -751,7 +823,7 @@
     event.preventDefault();
     event.stopPropagation();
     const items: MenuEntry[] = [
-      { label: 'Open', action: () => match.bufferId ? (mount(match.bufferId), jumpToLine(match.line)) : openRootFile(match.path!, match.line) },
+      { label: 'Open', action: () => match.bufferId ? (mount(match.bufferId), jumpToLine(match.line, query)) : openRootFile(match.path!, match.line) },
       ...(match.path ? [
         { label: 'Reveal in Explorer', action: () => revealPath(match.path!) },
         { label: 'Copy path', action: () => copyPath(match.path!) },
@@ -870,7 +942,7 @@
     run(async () => {
       if (action === 'new') await newFile(); else if (action === 'close' && workspace.active) await closeFile(workspace.active);
       else if (action === 'reopen') await reopen(); else if (action === 'wrap') wrap();
-      else if (action === 'sidebar') { workspace = { ...workspace, sidebar: !workspace.sidebar }; await refresh(); scheduleRecovery(); }
+      else if (action === 'sidebar') { workspace = { ...workspace, sidebar: !workspace.sidebar }; await refresh(); syncEditorSearch(); scheduleRecovery(); }
       else if (action === 'explorer' || action === 'search') await showPanel(action);
       else if (workspace.buffers.length) { const index = workspace.buffers.findIndex(b => b.id === workspace.active); mount(workspace.buffers[(index+(action === 'previous' ? workspace.buffers.length-1 : 1))%workspace.buffers.length].id); }
     });
@@ -942,7 +1014,7 @@
     <div id="app-View" popover class="command-menu">
       <button onclick={() => command(() => showPanel('explorer'))}>Explorer <kbd>Ctrl+Shift+E</kbd></button>
       <button onclick={() => command(() => showPanel('search'))}>Search <kbd>Ctrl+Shift+F</kbd></button>
-      <button onclick={() => command(() => { workspace = { ...workspace, sidebar: !workspace.sidebar }; scheduleRecovery(); })}>Toggle sidebar <kbd>Ctrl+B</kbd></button>
+      <button onclick={() => command(() => { workspace = { ...workspace, sidebar: !workspace.sidebar }; syncEditorSearch(); scheduleRecovery(); })}>Toggle sidebar <kbd>Ctrl+B</kbd></button>
       <button onclick={() => command(wrap)}>Toggle word wrap <kbd>Alt+Z</kbd></button>
     </div>
   </header>
@@ -962,20 +1034,34 @@
           <input id="workspace-search" aria-label="Search workspace text" bind:value={query} oninput={onSearchInput} placeholder="Search…"/>
           <button>Search</button>
         </form>
-        {#if query && !searchMatches.length}
+        {#if query && !searchGroups.length}
           <p class="empty-library">No results</p>
         {:else if query}
-          {#each searchMatches as match (match.key)}
+          {#each searchGroups as group (group.key)}
             <button
-              class="library-row"
-              title={`${match.path ? files.displayPath(match.path) : match.label}:${match.line}`}
-              onclick={() => run(() => match.bufferId ? (mount(match.bufferId), jumpToLine(match.line)) : openRootFile(match.path!, match.line))}
-              oncontextmenu={event => searchMatchContext(event, match)}
+              class="search-group-header"
+              aria-expanded={!collapsedGroups[group.key]}
+              title={group.path ? files.displayPath(group.path) : group.label}
+              onclick={() => toggleSearchGroup(group.key)}
             >
-              <span>·</span>
-              <span class="file-name">{match.label}:{match.line} {match.preview}</span>
-              {#if match.unsaved}<span class="file-unsaved-tag">unsaved</span>{/if}
+              <span>{collapsedGroups[group.key] ? '▸' : '▾'}</span>
+              <span class="file-name">{group.label}</span>
+              {#if group.unsaved}<span class="file-unsaved-tag">unsaved</span>{/if}
+              <span class="search-count-badge">{group.matches.length}</span>
             </button>
+            {#if !collapsedGroups[group.key]}
+              {#each group.matches as match (match.key)}
+                <button
+                  class="search-match-row"
+                  title={`${match.path ? files.displayPath(match.path) : match.label}:${match.line}`}
+                  onclick={() => run(() => match.bufferId ? (mount(match.bufferId), jumpToLine(match.line, query)) : openRootFile(match.path!, match.line))}
+                  oncontextmenu={event => searchMatchContext(event, match)}
+                >
+                  <span class="search-line-num">{match.line}</span>
+                  <span class="search-preview">{#each files.highlightText(match.preview, query) as part}{#if part.match}<mark class="search-match-mark">{part.text}</mark>{:else}{part.text}{/if}{/each}</span>
+                </button>
+              {/each}
+            {/if}
           {/each}
         {/if}
       {:else}
@@ -1050,7 +1136,7 @@
           {:else}<button class:danger={item.danger} disabled={item.disabled} onclick={() => command(item.action)}>{item.label}{#if item.shortcut}<kbd>{item.shortcut}</kbd>{/if}</button>{/if}
         {/each}
       </div>
-      {#if findVisible}<form class="find-bar" onsubmit={find}><input id="find" aria-label="Find in file" bind:value={findQuery} placeholder="Find…" onkeydown={event => { if (event.key === 'Escape') { findVisible = false; view?.focus(); } }}/><button>Find next</button><button type="button" aria-label="Close find" onclick={() => { findVisible = false; view?.focus(); }}>×</button></form>{/if}
+      {#if findVisible}<form class="find-bar" onsubmit={find}><input id="find" aria-label="Find in file" bind:value={findQuery} oninput={onFindInput} placeholder="Find…" onkeydown={event => { if (event.key === 'Escape') { event.preventDefault(); closeFind(); } else if (event.key === 'Enter' && event.shiftKey) { event.preventDefault(); stepFind(true); } }}/><button type="button" aria-label="Previous match" title="Previous match (Shift+Enter)" onclick={() => stepFind(true)}>↑</button><button type="submit" aria-label="Next match" title="Next match (Enter)">↓</button><button type="button" aria-label="Close find" onclick={closeFind}>×</button></form>{/if}
       <div id="file-panel" role="tabpanel" tabindex="0" aria-label="Active file" class="relative min-h-0 min-w-0 flex-1" oncontextmenu={editorContext}>
         <div class="h-full" class:hidden={!active} bind:this={host}></div>
         {#if !active && !loading}<div class="empty-workspace"><h1 class="empty-title">Simple Note</h1><div class="empty-actions"><button onclick={() => run(newFile)}>New file</button><button onclick={() => run(setRootFolder)}>{workspace.root ? 'Change root folder…' : 'Set root folder…'}</button><button onclick={() => run(() => showPanel('explorer'))}>Explorer</button></div></div>{/if}
