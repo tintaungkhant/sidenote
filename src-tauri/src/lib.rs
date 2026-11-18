@@ -56,6 +56,8 @@ pub fn run() {
             files::file_operation,
             files::file_picker,
             clipboard::file_clipboard,
+            clipboard::clipboard_read_text,
+            clipboard::clipboard_write_text,
             lifecycle::request_exit,
             lifecycle::exit_ready,
             lifecycle::cancel_exit,

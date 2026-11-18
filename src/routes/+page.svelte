@@ -39,9 +39,11 @@
   let searchEntries = $state.raw<files.Entry[]>([]);
   let searchMatches = $derived(files.searchWorkspace(query, workspace.buffers, searchEntries, workspace.root));
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
-  let renamingId = $state<string | null>(null), renameValue = $state('');
+  let renamingTarget = $state<{ kind: 'buffer'; id: string } | { kind: 'path'; path: string } | null>(null), renameValue = $state('');
   let closeTarget = $state<string | null>(null);
   let closeDialog: HTMLDialogElement;
+  let deleteTarget = $state<{ path: string; name: string } | null>(null);
+  let deleteDialog: HTMLDialogElement;
   let annotation = $state.raw<{ block: ImageBlock; blob: Blob } | undefined>();
   let closed: files.Buffer[] = [];
   let snapshotQueue: Promise<void> = Promise.resolve();
@@ -51,8 +53,9 @@
   let exitWork: Promise<void> | undefined;
   let boot: Promise<void> = Promise.resolve();
   let outputWork: Promise<string> | undefined;
-  let menuBuffer = $state<string | null>(null);
-  let tabMenu: HTMLDivElement;
+  type MenuEntry = { label: string; shortcut?: string; disabled?: boolean; danger?: boolean; action: () => Promise<void> | void } | 'separator';
+  let contextItems = $state.raw<MenuEntry[]>([]);
+  let contextPopover: HTMLDivElement;
 
   function patch(id: string, update: Partial<files.Buffer>) {
     workspace = { ...workspace, buffers: workspace.buffers.map(b => b.id === id ? { ...b, ...update } : b) };
@@ -161,11 +164,12 @@
       const dropCleanOutside = Boolean(buffer.path && buffer.id !== preserveId && !files.withinRoot(buffer.path, nextRoot) && !files.modified(buffer));
       if (dropCleanOutside) {
         states.delete(buffer.id);
-        if (renamingId === buffer.id) renamingId = null;
+        if (renamingTarget?.kind === 'buffer' && renamingTarget.id === buffer.id) renamingTarget = null;
       } else {
         retained.push(buffer);
       }
     }
+    if (renamingTarget?.kind === 'path' && !files.withinRoot(renamingTarget.path, nextRoot)) renamingTarget = null;
     const nextActive = retained.some(b => b.id === workspace.active) ? workspace.active : retained[0]?.id ?? null;
     workspace = { ...workspace, root: nextRoot, buffers: retained, active: nextActive };
     mount(nextActive);
@@ -298,8 +302,19 @@
     if (frozen || !id) return;
     const buffer = workspace.buffers.find(b => b.id === id);
     if (!buffer) return;
-    renamingId = buffer.id;
+    renamingTarget = { kind: 'buffer', id: buffer.id };
     renameValue = buffer.path ? (buffer.path.split(/[/\\]/).at(-1) ?? '') : (buffer.name ?? 'Untitled-1');
+    await tick();
+    const input = document.getElementById('rename-input') as HTMLInputElement | null;
+    input?.focus();
+    input?.select();
+  }
+  async function beginRenamePath(path: string) {
+    if (frozen || !path || !workspace.root || !files.withinRoot(path, workspace.root)) return;
+    const open = workspace.buffers.find(b => b.path && files.samePath(b.path, path));
+    if (open) { await beginRename(open.id); return; }
+    renamingTarget = { kind: 'path', path };
+    renameValue = path.split(/[/\\]/).at(-1) ?? '';
     await tick();
     const input = document.getElementById('rename-input') as HTMLInputElement | null;
     input?.focus();
@@ -307,12 +322,31 @@
   }
   function submitRename(event: SubmitEvent) {
     event.preventDefault();
-    const id = renamingId;
-    if (!id) return;
+    const target = renamingTarget;
+    if (!target) return;
     run(async () => {
       capture();
-      const buffer = workspace.buffers.find(b => b.id === id);
-      if (!buffer) { renamingId = null; return; }
+      if (target.kind === 'path') {
+        const open = workspace.buffers.find(b => b.path && files.samePath(b.path, target.path));
+        if (!open) {
+          if (!workspace.root || !files.withinRoot(target.path, workspace.root)) { renamingTarget = null; return; }
+          const currentName = target.path.split(/[/\\]/).at(-1) ?? '';
+          const dot = currentName.lastIndexOf('.');
+          const fallbackExt = dot >= 0 && dot < currentName.length - 1 ? currentName.slice(dot + 1) : 'md';
+          const valid = files.validateFileName(renameValue, fallbackExt);
+          const disk = await files.operation<files.DiskDocument>({ kind: 'rename', root: workspace.root, path: target.path, name: valid });
+          renamingTarget = null;
+          await refresh();
+          notice = `Renamed to ${disk.path.split(/[/\\]/).at(-1)}.`;
+          view?.focus();
+          return;
+        }
+      }
+      const id = target.kind === 'buffer'
+        ? target.id
+        : workspace.buffers.find(b => b.path && files.samePath(b.path, target.path))?.id;
+      const buffer = id ? workspace.buffers.find(b => b.id === id) : undefined;
+      if (!buffer) { renamingTarget = null; return; }
       const isRootFile = Boolean(buffer.path && workspace.root && files.withinRoot(buffer.path, workspace.root) && buffer.external !== 'deleted');
       if (isRootFile) {
         const currentName = buffer.path!.split(/[/\\]/).at(-1) ?? '';
@@ -342,7 +376,7 @@
           else if (states.has(buffer.id)) states.set(buffer.id, states.get(buffer.id)!.update({ effects: setMetadata.of(nextMetadata) }).state);
         }
         if (oldLanguage !== newLanguage && workspace.active === buffer.id) mount(buffer.id);
-        renamingId = null;
+        renamingTarget = null;
         await refresh();
         await checkpoint();
         notice = `Renamed to ${disk.path.split(/[/\\]/).at(-1)}.`;
@@ -357,7 +391,7 @@
         }
         patch(buffer.id, { name: valid });
         if (oldLanguage !== newLanguage && workspace.active === buffer.id) mount(buffer.id);
-        renamingId = null;
+        renamingTarget = null;
         await checkpoint();
         notice = `Renamed to ${valid}.`;
         view?.focus();
@@ -372,7 +406,7 @@
     if (choice === 'save' && !await saveFile(id)) return;
     capture();
     const previous = workspace;
-    if (renamingId === id) renamingId = null;
+    if (renamingTarget?.kind === 'buffer' && renamingTarget.id === id) renamingTarget = null;
     if (viewId === id) unmount();
     workspace = files.removeBuffer(workspace, id);
     states.delete(id);
@@ -509,42 +543,272 @@
         if (started) await checkpoint();
         await storage.finishExit(false);
       }
-      catch (error) { notice = `Could not preserve work for exit: ${errorMessage(error)}. Keep editing and retry.`; await storage.cancelExit(); frozen = false; view?.dispatch({ effects: editable.reconfigure(EditorView.editable.of(true)) }); }
+      catch (error) { notice = `Exit failed: ${errorMessage(error)}`; await storage.cancelExit(); frozen = false; view?.dispatch({ effects: editable.reconfigure(EditorView.editable.of(true)) }); }
       finally { exitWork = undefined; }
     })();
     return exitWork;
   }
   function menu(event: MouseEvent, id: string) {
+    document.querySelectorAll<HTMLElement>('.command-menu').forEach(m => m.hidePopover());
     const element = document.getElementById(id)!;
     const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
     element.style.left = `${rect.left}px`; element.style.top = `${rect.bottom}px`; element.showPopover();
     element.querySelector<HTMLButtonElement>('button')?.focus();
   }
   function command(work: () => Promise<void> | void) { document.querySelectorAll<HTMLElement>('.command-menu').forEach(m => m.hidePopover()); run(work); }
-  function tabContext(event: MouseEvent, id: string) {
-    event.preventDefault();
-    if (busy || frozen) return;
-    menuBuffer = id;
-    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-    const x = event.clientX || rect.left;
-    const y = event.clientY || rect.bottom;
-    tabMenu.style.left = `${Math.min(x, window.innerWidth - 240)}px`;
-    tabMenu.style.top = `${y}px`;
-    tabMenu.showPopover();
-    tabMenu.querySelector<HTMLButtonElement>('button')?.focus();
+  async function showContextMenu(x: number, y: number, items: MenuEntry[]) {
+    document.querySelectorAll<HTMLElement>('.command-menu').forEach(m => m.hidePopover());
+    if (!items.length || busy || frozen || loading || annotation || closeDialog?.open || deleteDialog?.open) return;
+    contextItems = items;
+    await tick();
+    if (!contextPopover) return;
+    contextPopover.style.left = '0px';
+    contextPopover.style.top = '0px';
+    contextPopover.showPopover();
+    const rect = contextPopover.getBoundingClientRect();
+    contextPopover.style.left = `${Math.max(4, Math.min(x, window.innerWidth - rect.width - 6))}px`;
+    contextPopover.style.top = `${Math.max(4, Math.min(y, window.innerHeight - rect.height - 6))}px`;
+    contextPopover.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
   }
-  function alterTab(direction: 'pin' | -1 | 1) {
-    const buffers = [...workspace.buffers], index = buffers.findIndex(b => b.id === menuBuffer);
+  async function revealPath(path: string) {
+    await files.operation<void>({ kind: 'reveal', path });
+  }
+  async function copyPath(path: string) {
+    await invoke<void>('clipboard_write_text', { text: files.displayPath(path) });
+    notice = 'Copied path.';
+  }
+  async function closeOthers(keepId: string) {
+    mount(keepId);
+    for (const buffer of [...workspace.buffers]) {
+      if (buffer.id === keepId || buffer.pinned) continue;
+      if (files.closeDecision(buffer) === 'prompt') {
+        mount(buffer.id);
+        await closeFile(buffer.id);
+        return;
+      }
+      await closeFile(buffer.id, 'discard');
+    }
+  }
+  function promptDelete(path: string, name: string) {
+    if (!workspace.root || !files.withinRoot(path, workspace.root)) return;
+    deleteTarget = { path, name };
+    deleteDialog.showModal();
+  }
+  async function confirmDelete() {
+    const target = deleteTarget;
+    if (!target || !workspace.root) { deleteDialog.close(); deleteTarget = null; return; }
+    await files.operation<void>({ kind: 'delete', root: workspace.root, path: target.path });
+    deleteDialog.close();
+    deleteTarget = null;
+    capture();
+    for (const buffer of [...workspace.buffers]) {
+      if (buffer.path && files.samePath(buffer.path, target.path)) {
+        if (viewId === buffer.id) unmount();
+        workspace = files.removeBuffer(workspace, buffer.id);
+        states.delete(buffer.id);
+      }
+    }
+    if (renamingTarget?.kind === 'buffer') {
+      const targetId = renamingTarget.id;
+      if (!workspace.buffers.some(b => b.id === targetId)) renamingTarget = null;
+    }
+    if (renamingTarget?.kind === 'path' && files.samePath(renamingTarget.path, target.path)) renamingTarget = null;
+    closed = closed.filter(b => !(b.path && files.samePath(b.path, target.path)));
+    mount(workspace.active);
+    await refresh();
+    await checkpoint();
+    notice = `Deleted ${target.name}.`;
+  }
+  function alterTab(id: string, direction: 'pin' | -1 | 1) {
+    const buffers = [...workspace.buffers], index = buffers.findIndex(b => b.id === id);
     if (index < 0) return;
     if (direction === 'pin') buffers[index] = { ...buffers[index], pinned: !buffers[index].pinned };
     else if (buffers[index + direction]?.pinned === buffers[index].pinned) [buffers[index], buffers[index + direction]] = [buffers[index + direction], buffers[index]];
     buffers.sort((a,b) => Number(b.pinned)-Number(a.pinned)); workspace = { ...workspace, buffers }; scheduleRecovery();
   }
+  function tabContext(event: MouseEvent, id: string) {
+    event.preventDefault();
+    event.stopPropagation();
+    const buffer = workspace.buffers.find(b => b.id === id);
+    if (!buffer) return;
+    const index = workspace.buffers.findIndex(b => b.id === id);
+    const canMoveLeft = index > 0 && workspace.buffers[index - 1]?.pinned === buffer.pinned;
+    const canMoveRight = index >= 0 && index < workspace.buffers.length - 1 && workspace.buffers[index + 1]?.pinned === buffer.pinned;
+    const onDisk = Boolean(buffer.path && buffer.external !== 'deleted');
+    const inRoot = Boolean(onDisk && workspace.root && files.withinRoot(buffer.path, workspace.root));
+    const items: MenuEntry[] = [
+      { label: 'Save', shortcut: 'Ctrl+S', action: () => saveFile(buffer.id).then(() => {}) },
+      { label: 'Rename', shortcut: 'F2', action: () => beginRename(buffer.id) },
+      ...(onDisk ? [
+        { label: 'Reveal in Explorer', action: () => revealPath(buffer.path!) },
+        { label: 'Copy path', action: () => copyPath(buffer.path!) },
+      ] : []),
+      'separator',
+      { label: buffer.pinned ? 'Unpin' : 'Pin', action: () => alterTab(buffer.id, 'pin') },
+      { label: 'Move left', disabled: !canMoveLeft, action: () => alterTab(buffer.id, -1) },
+      { label: 'Move right', disabled: !canMoveRight, action: () => alterTab(buffer.id, 1) },
+      'separator',
+      { label: 'Close', shortcut: 'Ctrl+W', action: () => closeFile(buffer.id) },
+      ...(workspace.buffers.length > 1 ? [{ label: 'Close others', action: () => closeOthers(buffer.id) }] : []),
+      ...(inRoot ? [{ label: 'Delete', danger: true, action: () => promptDelete(buffer.path!, files.title(buffer)) }] : []),
+    ];
+    void showContextMenu(event.clientX, event.clientY, items);
+  }
+  function unsavedEntryContext(event: MouseEvent, buffer: files.Buffer) {
+    event.preventDefault();
+    event.stopPropagation();
+    const items: MenuEntry[] = [
+      { label: 'Open', action: () => { mount(buffer.id); view?.focus(); } },
+      { label: 'Save', shortcut: 'Ctrl+S', action: () => saveFile(buffer.id).then(() => {}) },
+      { label: 'Rename', shortcut: 'F2', action: () => beginRename(buffer.id) },
+      'separator',
+      { label: 'Close', shortcut: 'Ctrl+W', action: () => closeFile(buffer.id) },
+    ];
+    void showContextMenu(event.clientX, event.clientY, items);
+  }
+  function rootEntryContext(event: MouseEvent, entry: files.Entry) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (entry.directory) {
+      void showContextMenu(event.clientX, event.clientY, [
+        { label: 'Reveal in Explorer', action: () => revealPath(entry.path) },
+        { label: 'Copy path', action: () => copyPath(entry.path) },
+      ]);
+      return;
+    }
+    const openBuffer = workspace.buffers.find(b => b.path && files.samePath(b.path, entry.path));
+    const items: MenuEntry[] = [
+      { label: 'Open', action: () => openRootFile(entry.path) },
+      ...(openBuffer && files.modified(openBuffer) ? [{ label: 'Save', shortcut: 'Ctrl+S', action: () => saveFile(openBuffer.id).then(() => {}) }] : []),
+      { label: 'Rename', shortcut: 'F2', action: () => beginRenamePath(entry.path) },
+      { label: 'Reveal in Explorer', action: () => revealPath(entry.path) },
+      { label: 'Copy path', action: () => copyPath(entry.path) },
+      'separator',
+      ...(openBuffer ? [{ label: 'Close tab', action: () => closeFile(openBuffer.id) }] : []),
+      { label: 'Delete', danger: true, action: () => promptDelete(entry.path, files.entryLabel(entry)) },
+    ];
+    void showContextMenu(event.clientX, event.clientY, items);
+  }
+  function searchMatchContext(event: MouseEvent, match: files.SearchMatch) {
+    event.preventDefault();
+    event.stopPropagation();
+    const items: MenuEntry[] = [
+      { label: 'Open', action: () => match.bufferId ? (mount(match.bufferId), jumpToLine(match.line)) : openRootFile(match.path!, match.line) },
+      { label: 'Rename', shortcut: 'F2', action: () => match.bufferId ? beginRename(match.bufferId) : beginRenamePath(match.path!) },
+      ...(match.path ? [
+        { label: 'Reveal in Explorer', action: () => revealPath(match.path!) },
+        { label: 'Copy path', action: () => copyPath(match.path!) },
+      ] : []),
+    ];
+    void showContextMenu(event.clientX, event.clientY, items);
+  }
+  function sidebarContext(event: MouseEvent) {
+    if ((event.target as HTMLElement | null)?.closest('input, textarea')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void showContextMenu(event.clientX, event.clientY, [
+      { label: 'New file', shortcut: 'Ctrl+N', action: newFile },
+      { label: 'Refresh', action: refresh },
+      { label: workspace.root ? 'Change root folder…' : 'Set root folder…', shortcut: 'Ctrl+O', action: setRootFolder },
+    ]);
+  }
+  function editorContext(event: MouseEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!active || !view) return;
+    const hasSelection = !view.state.selection.main.empty;
+    const targetId = active.id;
+    const items: MenuEntry[] = [
+      {
+        label: 'Cut', shortcut: 'Ctrl+X', disabled: !hasSelection, action: async () => {
+          if (!view) return;
+          const s = view.state.selection.main;
+          if (s.empty) return;
+          await invoke<void>('clipboard_write_text', { text: view.state.sliceDoc(s.from, s.to) });
+          view.dispatch({ changes: { from: s.from, to: s.to }, selection: { anchor: s.from }, userEvent: 'delete.cut' });
+          view.focus();
+        },
+      },
+      {
+        label: 'Copy', shortcut: 'Ctrl+C', action: async () => {
+          if (!view) return;
+          const s = view.state.selection.main;
+          const line = view.state.doc.lineAt(s.from);
+          const from = s.empty ? line.from : s.from;
+          const to = s.empty ? line.to : s.to;
+          await invoke<void>('clipboard_write_text', { text: view.state.sliceDoc(from, to) });
+          view.focus();
+        },
+      },
+      {
+        label: 'Paste', shortcut: 'Ctrl+V', action: async () => {
+          const text = await invoke<string | null>('clipboard_read_text');
+          await pasteImage(text ?? '');
+          view?.focus();
+        },
+      },
+      { label: 'Paste screenshot', action: () => pasteImage() },
+      'separator',
+      {
+        label: 'Select all', shortcut: 'Ctrl+A', action: () => {
+          if (!view) return;
+          view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+          view.focus();
+        },
+      },
+      { label: 'Find', shortcut: 'Ctrl+F', action: openFind },
+      'separator',
+      { label: 'Rename', shortcut: 'F2', action: () => beginRename(targetId) },
+      { label: 'Save', shortcut: 'Ctrl+S', action: () => saveFile(targetId).then(() => {}) },
+    ];
+    void showContextMenu(event.clientX, event.clientY, items);
+  }
+  function inputMenuItems(target: HTMLInputElement | HTMLTextAreaElement): MenuEntry[] {
+    const canEdit = !target.readOnly && !target.disabled;
+    const start = target.selectionStart ?? 0, end = target.selectionEnd ?? 0;
+    const hasSelection = end > start;
+    return [
+      {
+        label: 'Cut', shortcut: 'Ctrl+X', disabled: !hasSelection || !canEdit, action: async () => {
+          await invoke<void>('clipboard_write_text', { text: target.value.slice(start, end) });
+          target.setRangeText('', start, end, 'start');
+          target.dispatchEvent(new Event('input', { bubbles: true }));
+          target.focus();
+        },
+      },
+      {
+        label: 'Copy', shortcut: 'Ctrl+C', disabled: !hasSelection, action: async () => {
+          await invoke<void>('clipboard_write_text', { text: target.value.slice(start, end) });
+          target.focus();
+        },
+      },
+      {
+        label: 'Paste', shortcut: 'Ctrl+V', disabled: !canEdit, action: async () => {
+          const text = await invoke<string | null>('clipboard_read_text');
+          if (text !== null) {
+            target.setRangeText(text, start, end, 'end');
+            target.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+          target.focus();
+        },
+      },
+      'separator',
+      { label: 'Select all', shortcut: 'Ctrl+A', action: () => { target.focus(); target.select(); } },
+    ];
+  }
+  function onWindowContextMenu(event: MouseEvent) {
+    event.preventDefault();
+    if (annotation || closeDialog?.open || deleteDialog?.open) return;
+    const target = event.target;
+    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+      void showContextMenu(event.clientX, event.clientY, inputMenuItems(target));
+    }
+  }
   function shortcut(event: KeyboardEvent) {
-    if (annotation || closeDialog?.open || event.isComposing || event.altKey && event.key.toLowerCase() !== 'z') return;
+    if (annotation || closeDialog?.open || deleteDialog?.open || event.isComposing || event.altKey && event.key.toLowerCase() !== 'z') return;
     const key = event.key.toLowerCase();
     if ((event.ctrlKey || event.metaKey) && (key === 's' || key === 'o')) { event.preventDefault(); run(() => key === 's' ? saveFile(workspace.active,event.shiftKey).then(() => {}) : setRootFolder()); return; }
-    if (event.key === 'F2' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && workspace.active && !renamingId && !busy && !frozen) { event.preventDefault(); run(() => beginRename(workspace.active)); return; }
+    if (event.key === 'F2' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && workspace.active && !renamingTarget && !busy && !frozen) { event.preventDefault(); run(() => beginRename(workspace.active)); return; }
     const action = tabShortcut(event); if (!action) return; event.preventDefault();
     if (action === 'quit') { void storage.requestExit(); return; }
     run(async () => {
@@ -590,8 +854,9 @@
     void boot.catch(error => { startupError = errorMessage(error); }).finally(() => { loading = false; void poll(); });
     const interval = setInterval(() => { void poll(); }, 2000);
     window.addEventListener('keydown', shortcut);
+    window.addEventListener('contextmenu', onWindowContextMenu);
     const focus = () => { void poll(); }; window.addEventListener('focus', focus);
-    return () => { disposed = true; clearInterval(interval); clearTimeout(timer); clearTimeout(searchTimer); unlisten?.(); window.removeEventListener('keydown',shortcut); window.removeEventListener('focus',focus); view?.destroy(); };
+    return () => { disposed = true; clearInterval(interval); clearTimeout(timer); clearTimeout(searchTimer); unlisten?.(); window.removeEventListener('keydown',shortcut); window.removeEventListener('contextmenu', onWindowContextMenu); window.removeEventListener('focus',focus); view?.destroy(); };
   });
 </script>
 
@@ -602,7 +867,7 @@
     <nav class="app-menubar" aria-label="Application menus">
       {#each ['File','Edit','View'] as name}<button type="button" aria-haspopup="true" onclick={event => menu(event,`app-${name}`)}>{name}</button>{/each}
     </nav>
-    <div class="header-center"><button class="header-search-pill" onclick={() => run(() => showPanel('search'))}>Search files… <kbd>Ctrl+Shift+F</kbd></button></div>
+    <div class="header-center"><button class="header-search-pill" onclick={() => run(() => showPanel('search'))}>Search <kbd>Ctrl+Shift+F</kbd></button></div>
     <button class="header-btn" disabled={!active || busy || loading || frozen} onclick={() => run(() => saveFile().then(() => {}))}>Save <kbd>Ctrl+S</kbd></button>
     <div id="app-File" popover class="command-menu">
       <button onclick={() => command(newFile)}>New file <kbd>Ctrl+N</kbd></button>
@@ -625,32 +890,31 @@
       <button onclick={() => command(wrap)}>Toggle word wrap <kbd>Alt+Z</kbd></button>
     </div>
   </header>
-  {#if startupError}<div role="alert" class="p-3 bg-red-950">Could not load workspace: {startupError}. Recovery was preserved. Restart after resolving the error.</div>{/if}
-  {#if recoveryError}<div role="alert" class="p-3 bg-red-950">Recovery failed: {recoveryError}. Your work remains open. <button onclick={() => run(() => checkpoint())}>Retry recovery</button></div>{/if}
-  {#if active?.external}<div role="alert" class="p-3 bg-amber-950">{active.external === 'deleted' ? 'File deleted or renamed externally. This buffer is retained; Save writes a new copy in the root folder.' : active.external === 'changed' ? 'File changed externally. Your unsaved edits are retained.' : 'File is unreadable. Your buffer is retained.'} <button onclick={() => run(() => saveFile(workspace.active,true).then(() => {}))}>Save copy in root</button>{#if active.external !== 'deleted'}<button onclick={() => run(reloadDisk)}>Reload from disk</button>{/if}</div>{/if}
+  {#if startupError}<div role="alert" class="p-3 bg-red-950">Could not load workspace: {startupError}</div>{/if}
+  {#if recoveryError}<div role="alert" class="p-3 bg-red-950">Recovery failed: {recoveryError} <button onclick={() => run(() => checkpoint())}>Retry</button></div>{/if}
+  {#if active?.external}<div role="alert" class="p-3 bg-amber-950">{active.external === 'deleted' ? 'File deleted or moved on disk.' : active.external === 'changed' ? 'File changed on disk.' : 'File unreadable.'} <button onclick={() => run(() => saveFile(workspace.active,true).then(() => {}))}>Save copy in root</button>{#if active.external !== 'deleted'}<button onclick={() => run(reloadDisk)}>Reload from disk</button>{/if}</div>{/if}
   <div class="workspace">
     <nav class="activity-bar" aria-label="Workspace views">
       <button title="Explorer (Ctrl+Shift+E)" aria-label="Explorer" aria-pressed={workspace.sidebar && panel === 'explorer'} onclick={() => run(() => showPanel('explorer'))}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h8l4 4v14H8zM16 3v5h4M5 6H3v15h2"/></svg></button>
       <button title="Search (Ctrl+Shift+F)" aria-label="Search" aria-pressed={workspace.sidebar && panel === 'search'} onclick={() => run(() => showPanel('search'))}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg></button>
     </nav>
-    {#if workspace.sidebar}<aside class="note-sidebar" aria-label={panel}>
+    {#if workspace.sidebar}<aside class="note-sidebar" aria-label={panel} oncontextmenu={sidebarContext}>
       <div class="sidebar-header"><span class="sidebar-title">{panel.toUpperCase()}</span><div class="sidebar-actions"><button onclick={() => run(setRootFolder)}>{workspace.root ? 'Change root…' : 'Set root…'}</button><button class="sidebar-btn" aria-label="Refresh folder" title="Refresh" onclick={() => run(refresh)}>↻</button></div></div>
-      <p class="sidebar-root-info">{workspace.root ? files.displayPath(workspace.root) : 'No root folder set — select one now or on first Save.'}</p>
+      {#if workspace.root}<p class="sidebar-root-info">{files.displayPath(workspace.root)}</p>{/if}
       {#if panel === 'search'}
         <form class="library-search" onsubmit={event => { event.preventDefault(); run(refresh); }}>
-          <input id="workspace-search" aria-label="Search workspace text" bind:value={query} oninput={onSearchInput} placeholder="Search unsaved & saved files…"/>
+          <input id="workspace-search" aria-label="Search workspace text" bind:value={query} oninput={onSearchInput} placeholder="Search…"/>
           <button>Search</button>
         </form>
-        {#if !query}
-          <p class="empty-library">Type to search unsaved tabs and root files.</p>
-        {:else if !searchMatches.length}
-          <p class="empty-library">No matches found.</p>
-        {:else}
+        {#if query && !searchMatches.length}
+          <p class="empty-library">No results</p>
+        {:else if query}
           {#each searchMatches as match (match.key)}
             <button
               class="library-row"
               title={`${match.path ? files.displayPath(match.path) : match.label}:${match.line}`}
               onclick={() => run(() => match.bufferId ? (mount(match.bufferId), jumpToLine(match.line)) : openRootFile(match.path!, match.line))}
+              oncontextmenu={event => searchMatchContext(event, match)}
             >
               <span>·</span>
               <span class="file-name">{match.label}:{match.line} {match.preview}</span>
@@ -667,6 +931,7 @@
               class:current={workspace.active === buffer.id}
               title={buffer.path ? `${files.displayPath(buffer.path)} (outside root)` : `${files.title(buffer)} (Unsaved)`}
               onclick={() => run(() => { mount(buffer.id); view?.focus(); })}
+              oncontextmenu={event => unsavedEntryContext(event, buffer)}
             >
               <span>·</span>
               <span class="file-name">{files.title(buffer)}{files.modified(buffer) ? ' ●' : ''}</span>
@@ -684,17 +949,15 @@
               class="library-row"
               class:current={Boolean(active?.path && files.samePath(active.path, entry.path))}
               title={files.displayPath(entry.path)}
-              disabled={entry.directory}
+              aria-disabled={entry.directory}
               style:padding-left={`${12 + files.entryDepth(entry) * 12}px`}
-              onclick={() => run(() => openRootFile(entry.path))}
+              onclick={() => { if (!entry.directory) run(() => openRootFile(entry.path)); }}
+              oncontextmenu={event => rootEntryContext(event, entry)}
             >
               <span>{entry.directory ? '▾' : '·'}</span>
               <span class="file-name">{files.entryLabel(entry)}{openBuffer && files.modified(openBuffer) ? ' ●' : ''}</span>
             </button>
           {/each}
-        {/if}
-        {#if !unsavedBuffers.length && !explorerEntries.length}
-          <p class="empty-library">{workspace.root ? 'No files yet.' : 'No unsaved or root files yet.'}</p>
         {/if}
       {/if}
     </aside>{/if}
@@ -709,21 +972,28 @@
         {/each}
         <button class="tab-new-btn" title="New file (Ctrl+N)" onclick={() => run(newFile)}>＋</button>
       </div>
-      <div bind:this={tabMenu} popover class="command-menu" aria-label="Tab actions">
-        <button onclick={() => command(() => beginRename(menuBuffer!))}>Rename</button><button onclick={() => command(() => alterTab('pin'))}>Pin / Unpin</button><button onclick={() => command(() => alterTab(-1))}>Move left</button><button onclick={() => command(() => alterTab(1))}>Move right</button><button onclick={() => command(() => closeFile(menuBuffer!))}>Close</button>
+      <div bind:this={contextPopover} popover class="command-menu" aria-label="Context menu">
+        {#each contextItems as item}
+          {#if item === 'separator'}<div class="menu-separator"></div>
+          {:else}<button class:danger={item.danger} disabled={item.disabled} onclick={() => command(item.action)}>{item.label}{#if item.shortcut}<kbd>{item.shortcut}</kbd>{/if}</button>{/if}
+        {/each}
       </div>
-      {#if renamingId}<form class="rename-bar" onsubmit={submitRename}><label for="rename-input" class="text-xs text-[var(--text-secondary)]">Rename</label><input id="rename-input" aria-label="New file name" bind:value={renameValue} onkeydown={event => { if (event.key === 'Escape') { event.preventDefault(); renamingId = null; view?.focus(); } }}/><button>Apply</button><button type="button" onclick={() => { renamingId = null; view?.focus(); }}>Cancel</button></form>{/if}
+      {#if renamingTarget}<form class="rename-bar" onsubmit={submitRename}><label for="rename-input" class="text-xs text-[var(--text-secondary)]">Rename</label><input id="rename-input" aria-label="New file name" bind:value={renameValue} onkeydown={event => { if (event.key === 'Escape') { event.preventDefault(); renamingTarget = null; view?.focus(); } }}/><button>Apply</button><button type="button" onclick={() => { renamingTarget = null; view?.focus(); }}>Cancel</button></form>{/if}
       {#if findVisible}<form class="find-bar" onsubmit={find}><input id="find" aria-label="Find in file" bind:value={findQuery} placeholder="Find…" onkeydown={event => { if (event.key === 'Escape') { findVisible = false; view?.focus(); } }}/><button>Find next</button><button type="button" aria-label="Close find" onclick={() => { findVisible = false; view?.focus(); }}>×</button></form>{/if}
-      <div id="file-panel" role="tabpanel" tabindex="0" aria-label="Active file" class="relative min-h-0 min-w-0 flex-1">
+      <div id="file-panel" role="tabpanel" tabindex="0" aria-label="Active file" class="relative min-h-0 min-w-0 flex-1" oncontextmenu={editorContext}>
         <div class="h-full" class:hidden={!active} bind:this={host}></div>
-        {#if !active && !loading}<div class="empty-workspace"><h1 class="empty-title">Simple Note</h1><p class="empty-desc">All files stay in your root folder. Unsaved tabs remain searchable and recovered until saved.</p><div class="empty-actions"><button onclick={() => run(newFile)}>New file</button><button onclick={() => run(setRootFolder)}>{workspace.root ? 'Change root folder…' : 'Set root folder…'}</button><button onclick={() => run(() => showPanel('explorer'))}>Explorer</button></div></div>{/if}
+        {#if !active && !loading}<div class="empty-workspace"><h1 class="empty-title">Simple Note</h1><div class="empty-actions"><button onclick={() => run(newFile)}>New file</button><button onclick={() => run(setRootFolder)}>{workspace.root ? 'Change root folder…' : 'Set root folder…'}</button><button onclick={() => run(() => showPanel('explorer'))}>Explorer</button></div></div>{/if}
       </div>
     </div>
   </div>
   <footer class="status-bar"><span role="status">{loading ? 'Loading…' : busy || frozen ? 'Working…' : active && files.modified(active) ? 'Modified' : 'Saved'}{recoveryError ? ' · Recovery failed' : ''}</span>{#if notice}<span role="status" class="status-notice">{notice}</span>{/if}<div class="status-tools"><button onclick={() => run(wrap)}>Wrap: {workspace.wrap ? 'On' : 'Off'}</button><span>{active ? files.bufferLanguage(active) : 'markdown'} · UTF-8</span></div></footer>
 </main>
 <dialog bind:this={closeDialog} class="settings-dialog" aria-labelledby="close-heading" oncancel={() => { closeTarget = null; }}>
-  <h2 id="close-heading">Save changes before closing?</h2><p>Unsaved changes will be lost if you choose Don’t Save.</p>
+  <h2 id="close-heading">Save changes before closing?</h2>
   <div class="dialog-actions"><button disabled={busy} onclick={() => run(() => closeFile(closeTarget!,'save'))}>Save</button><button disabled={busy} onclick={() => run(() => closeFile(closeTarget!,'discard'))}>Don’t Save</button><button disabled={busy} onclick={() => { closeDialog.close(); closeTarget = null; }}>Cancel</button></div>
 </dialog>
-{#if annotation}<AnnotationEditor block={annotation.block} blob={annotation.blob} status={recoveryError || 'Changes retained in recovery until Save'} onchange={annotate} onoutput={outputAnnotation} onclose={() => { annotation = undefined; view?.focus(); }}/>{/if}
+<dialog bind:this={deleteDialog} class="settings-dialog" aria-labelledby="delete-heading" oncancel={() => { deleteTarget = null; }}>
+  <h2 id="delete-heading">Delete {deleteTarget?.name ?? ''}?</h2>
+  <div class="dialog-actions"><button disabled={busy} onclick={() => run(confirmDelete)}>Delete</button><button disabled={busy} onclick={() => { deleteDialog.close(); deleteTarget = null; }}>Cancel</button></div>
+</dialog>
+{#if annotation}<AnnotationEditor block={annotation.block} blob={annotation.blob} status={recoveryError} onchange={annotate} onoutput={outputAnnotation} onclose={() => { annotation = undefined; view?.focus(); }}/>{/if}

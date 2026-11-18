@@ -309,7 +309,7 @@
     if (outputBusy || !imageWidth) return;
     gesture = undefined; panGesture = undefined; outputBusy = true; outputMessage = action === 'copy' ? 'Copying image…' : 'Exporting PNG…';
     try { outputMessage = await onoutput(action, annotations, imageWidth, imageHeight); }
-    catch (error) { outputMessage = `Could not ${action === 'copy' ? 'copy image' : 'export PNG'}: ${errorMessage(error)}. Your annotations remain editable; retry or choose another destination.`; }
+    catch (error) { outputMessage = `Could not ${action === 'copy' ? 'copy image' : 'export PNG'}: ${errorMessage(error)}`; }
     finally { outputBusy = false; }
   }
   let preview = $derived(gesture?.draft ? gesture.original ? annotations.map((a, i) => i === selected ? gesture!.draft! : a) : [...annotations, gesture.draft] : annotations);
@@ -414,7 +414,7 @@
       </div>
     </section>
   </div>
-  <footer class="annotation-footer"><span role="status">{status}</span><span class="annotation-hint">Ctrl+Scroll zoom · Space+Drag pan</span><span>{imageWidth ? `${imageWidth} × ${imageHeight}` : 'Loading image…'}</span></footer>
+  <footer class="annotation-footer"><span role="status">{status}</span><span>{imageWidth ? `${imageWidth} × ${imageHeight}` : 'Loading image…'}</span></footer>
   </fieldset>
 </dialog>
 
@@ -812,9 +812,6 @@
     color: #6b7280;
     font-size: 11px;
   }
-  .annotation-hint {
-    opacity: 0.75;
-  }
   .annotation-footer > :last-child {
     margin-left: auto;
   }
@@ -824,6 +821,5 @@
     .tool-button { gap: 6px; }
     .tool-button kbd { display: none; }
     .annotation-properties { padding: 10px; gap: 12px; }
-    .annotation-hint { display: none; }
   }
 </style>

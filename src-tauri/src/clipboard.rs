@@ -136,3 +136,27 @@ pub async fn file_clipboard() -> Result<Option<Vec<u8>>, StoreError> {
     }
     Ok(bytes)
 }
+
+#[tauri::command]
+pub async fn clipboard_read_text() -> Result<Option<String>, StoreError> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let mut clipboard = arboard::Clipboard::new().map_err(failed)?;
+        match clipboard.get_text() {
+            Ok(text) => Ok(Some(text)),
+            Err(arboard::Error::ContentNotAvailable) => Ok(None),
+            Err(error) => Err(failed(error)),
+        }
+    })
+    .await
+    .map_err(failed)?
+}
+
+#[tauri::command]
+pub async fn clipboard_write_text(text: String) -> Result<(), StoreError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut clipboard = arboard::Clipboard::new().map_err(failed)?;
+        clipboard.set_text(text).map_err(failed)
+    })
+    .await
+    .map_err(failed)?
+}

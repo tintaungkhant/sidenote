@@ -862,6 +862,42 @@ impl FileStore {
         }
         Ok(migrated)
     }
+    fn delete(&self, root: &Path, path: &Path) -> Result<()> {
+        let root = fs::canonicalize(root).map_err(fail)?;
+        if !root.is_dir() {
+            return Err(fail("Root path is not a folder"));
+        }
+        let current = fs::canonicalize(path).map_err(fail)?;
+        if !current.starts_with(&root) || current == root {
+            return Err(fail("File is outside the workspace root"));
+        }
+        if !fs::symlink_metadata(&current).map_err(fail)?.is_file() {
+            return Err(fail("Not a file"));
+        }
+        let parent = current
+            .parent()
+            .ok_or_else(|| fail("No parent directory"))?;
+        if parent != root
+            && current
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|m| is_pure_note_package(parent, m))
+        {
+            if !parent.starts_with(&root) || parent == root {
+                return Err(fail("Note folder is outside the workspace root"));
+            }
+            fs::remove_dir_all(parent).map_err(fail)?;
+        } else {
+            let sidecar = companion(&current)?;
+            fs::remove_file(&current).map_err(fail)?;
+            if sidecar.file_name() != Some(std::ffi::OsStr::new(".simple-note.json"))
+                && sidecar.exists()
+            {
+                let _ = fs::remove_file(&sidecar);
+            }
+        }
+        Ok(())
+    }
     fn snapshot(&self, snapshot: &str) -> Result<()> {
         if snapshot.len() > 64 * 1024 * 1024 {
             return Err(fail("Recovery exceeds 64 MiB"));
@@ -928,6 +964,13 @@ pub enum Operation {
     MigrateRoot {
         root: String,
     },
+    Delete {
+        root: String,
+        path: String,
+    },
+    Reveal {
+        path: String,
+    },
     Recover,
     Snapshot {
         snapshot: String,
@@ -991,6 +1034,98 @@ fn package_main(dir: &Path) -> Option<String> {
         }
     }
     Some(main.to_owned())
+}
+fn is_pure_note_package(dir: &Path, main_name: &str) -> bool {
+    if !fs::symlink_metadata(dir)
+        .map(|m| m.is_dir())
+        .unwrap_or(false)
+        || package_main(dir).as_deref() != Some(main_name)
+    {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else { return false };
+        let Ok(kind) = entry.file_type() else {
+            return false;
+        };
+        if kind.is_symlink() {
+            return false;
+        }
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            return false;
+        };
+        if kind.is_dir() {
+            if name_str != "assets" {
+                return false;
+            }
+        } else if kind.is_file()
+            && name_str != main_name
+            && name_str != ".simple-note.json"
+            && !name_str.ends_with(".simple-note.json")
+        {
+            return false;
+        }
+    }
+    true
+}
+fn clean_os_path(path: &Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{unc}"))
+    } else if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    }
+}
+fn reveal(path: &Path) -> Result<()> {
+    let canonical = fs::canonicalize(path).map_err(fail)?;
+    let target = match (
+        canonical.parent(),
+        canonical.file_name().and_then(|n| n.to_str()),
+    ) {
+        (Some(parent), Some(name)) if package_main(parent).as_deref() == Some(name) => {
+            parent.to_path_buf()
+        }
+        _ => canonical,
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let display = clean_os_path(&target).to_string_lossy().into_owned();
+        if display.contains('"') {
+            return Err(fail("Unsupported path"));
+        }
+        std::process::Command::new("explorer.exe")
+            .raw_arg(format!("/select,\"{display}\""))
+            .spawn()
+            .map_err(fail)?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(&target)
+            .spawn()
+            .map_err(fail)?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let dir = if target.is_dir() {
+            target.as_path()
+        } else {
+            target.parent().unwrap_or(target.as_path())
+        };
+        std::process::Command::new("xdg-open")
+            .arg(dir)
+            .spawn()
+            .map_err(fail)?;
+    }
+    Ok(())
 }
 fn browse(root: &Path, query: &str) -> Result<Value> {
     fn visit(
@@ -1177,6 +1312,14 @@ pub async fn file_operation(
                 &name
             )?)),
             Operation::MigrateRoot { root } => Ok(json!(store.migrate_root(Path::new(&root))?)),
+            Operation::Delete { root, path } => {
+                store.delete(Path::new(&root), Path::new(&path))?;
+                Ok(Value::Null)
+            }
+            Operation::Reveal { path } => {
+                reveal(Path::new(&path))?;
+                Ok(Value::Null)
+            }
             Operation::Recover => {
                 let p = recovery.join("session.json");
                 if !p.exists() {
@@ -1680,5 +1823,44 @@ mod tests {
             .unwrap(),
             image
         );
+    }
+    #[test]
+    fn delete_removes_package_folder_or_standalone_file_and_rejects_outside_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("workspace");
+        let outside = dir.path().join("outside.md");
+        fs::create_dir(&root).unwrap();
+        fs::write(&outside, "outside").unwrap();
+        let store = FileStore::new(dir.path().join("app")).unwrap();
+        let image = png();
+        fs::write(store.recovery.join("assets/a.png"), &image).unwrap();
+        let rec_path = "recovery:assets/a.png";
+        let source = format!("note\n![image]({rec_path})\n");
+        let doc = store
+            .create_in_root(
+                &root,
+                Some("note-a.md"),
+                &source,
+                &metadata(rec_path),
+                None,
+                &[reference(&source, rec_path)],
+            )
+            .unwrap();
+        assert!(root.join("note-a/assets/a.png").exists());
+        store.delete(&root, Path::new(&doc.path)).unwrap();
+        assert!(!root.join("note-a").exists());
+
+        fs::create_dir(root.join("sub")).unwrap();
+        let plain = root.join("sub/plain.md");
+        let keep = root.join("sub/keep.md");
+        fs::write(&plain, "bye").unwrap();
+        fs::write(root.join("sub/plain.md.simple-note.json"), "{}").unwrap();
+        fs::write(&keep, "stay").unwrap();
+        store.delete(&root, &plain).unwrap();
+        assert!(!plain.exists());
+        assert!(!root.join("sub/plain.md.simple-note.json").exists());
+        assert!(keep.exists());
+
+        assert!(store.delete(&root, &outside).is_err());
     }
 }

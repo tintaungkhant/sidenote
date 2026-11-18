@@ -317,6 +317,13 @@ fieldset {
   background: rgba(99, 102, 241, 0.2);
   color: #fff;
 }
+.command-menu button.danger {
+  color: #f87171;
+}
+.command-menu button.danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.18);
+  color: #fca5a5;
+}
 .command-menu kbd {
   font-size: 10px;
   font-family: ui-monospace, SFMono-Regular, monospace;
@@ -744,19 +751,12 @@ fieldset {
   font-size: 18px;
   font-weight: 600;
   color: var(--text-primary);
-  margin-bottom: 6px;
-}
-.empty-desc {
-  font-size: 13px;
-  color: var(--text-secondary);
-  max-width: 360px;
-  margin-bottom: 24px;
-  line-height: 1.5;
+  margin-bottom: 16px;
 }
 .empty-actions {
   display: flex;
   gap: 10px;
-  margin-bottom: 32px;
+  margin-bottom: 0;
 }
 .empty-shortcuts {
   display: grid;

@@ -60,7 +60,6 @@ class ImageWidget extends WidgetType {
     const button = document.createElement('button');
     button.type = 'button'; button.className = 'note-image-button';
     button.setAttribute('aria-label', 'Annotate image');
-    button.title = 'Click to open annotation editor';
     button.onclick = () => this.open(this.block);
     const area = document.createElement('span');
     area.className = 'note-image-area';
@@ -83,7 +82,7 @@ class ImageWidget extends WidgetType {
       if (!alive) return;
       image.hidden = true;
       status.hidden = false;
-      status.textContent = 'Image unavailable; reopen the tab to retry';
+      status.textContent = 'Image unavailable';
     };
     void this.load(this.block.attachmentId).then(blob => {
       if (!alive) return;
