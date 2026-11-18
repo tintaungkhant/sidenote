@@ -116,7 +116,10 @@
     assetsChanged: boolean;
   } | null>(null);
   let annotation = $state.raw<{ block: ImageBlock; blob: Blob } | undefined>();
-  let closed: files.Buffer[] = [];
+  // Reopen reads from disk; never retain discarded source, metadata, or undo history.
+  let closed: { path: string | null }[] = [];
+  let capturedDoc: EditorState['doc'] | undefined;
+  let capturedText = '';
   let snapshotQueue: Promise<void> = Promise.resolve();
   let action: Promise<void> = Promise.resolve();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -133,8 +136,16 @@
   }
   function capture() {
     if (!view || !viewId) return;
+    const buffer = workspace.buffers.find(b => b.id === viewId);
+    if (!buffer) return;
     const selection = view.state.selection.main;
-    patch(viewId, { text: view.state.doc.toString(), metadata: view.state.field(metadataField), anchor: selection.anchor, head: selection.head, scrollTop: view.scrollDOM.scrollTop });
+    if (capturedDoc !== view.state.doc) {
+      capturedDoc = view.state.doc;
+      capturedText = capturedDoc.toString();
+    }
+    const metadata = view.state.field(metadataField), scrollTop = view.scrollDOM.scrollTop;
+    if (buffer.text === capturedText && buffer.metadata === metadata && buffer.anchor === selection.anchor && buffer.head === selection.head && buffer.scrollTop === scrollTop) return;
+    patch(viewId, { text: capturedText, metadata, anchor: selection.anchor, head: selection.head, scrollTop });
   }
   function checkpoint(): Promise<void> {
     capture();
@@ -160,6 +171,7 @@
     capture();
     if (view && viewId) states.set(viewId, view.state);
     view?.destroy(); view = undefined; viewId = undefined;
+    capturedDoc = undefined; capturedText = '';
   }
   function mount(id: string | null) {
     if (id === viewId) return;
@@ -601,12 +613,11 @@
         const open = workspace.buffers.find(b => b.path && files.samePath(b.path, change.path));
         if (open) {
           const disk = await files.readFile(change.path);
+          const wasActive = viewId === open.id;
+          if (wasActive) unmount();
+          states.delete(open.id);
           patch(open.id, { ...disk, baseline: files.fingerprint(disk.text, disk.metadata), external: null });
-          if (viewId === open.id) {
-            unmount();
-            states.delete(open.id);
-            mount(open.id);
-          }
+          if (wasActive) mount(open.id);
         }
       } else if (change.bufferId) {
         await removeOpenBuffer(change.bufferId);
@@ -987,7 +998,7 @@
     mount(workspace.active);
     try { await checkpoint(); }
     catch (error) { unmount(); workspace = previous; mount(previous.active); throw error; }
-    closed.push(buffer.path ? { ...buffer, baseline: buffer.baseline } : files.untitled());
+    closed.push({ path: buffer.path });
   }
   async function closeFile(id: string, choice?: 'save' | 'discard') {
     capture();
@@ -1035,10 +1046,6 @@
     workspace = { ...workspace, sidebar: true };
     syncEditorSearch();
     await refresh();
-    if (next === 'git' || next === 'timeline') {
-      await refreshVcs();
-      await refreshWorkspaceVcs();
-    }
     scheduleRecovery();
     if (next === 'search') {
       await tick();
@@ -1113,8 +1120,9 @@
     unmount(); states.delete(id); patch(id, { ...disk, baseline: files.fingerprint(disk.text, disk.metadata), external: null }); mount(id); await checkpoint();
   }
   async function poll() {
-    if (polling || busy || frozen || loading || annotation || renamingTarget || savePrompt || commitTargetId || restoreTarget || startupError) return;
+    if (disposed || polling || busy || frozen || loading || annotation || renamingTarget || savePrompt || commitTargetId || restoreTarget || startupError) return;
     polling = true;
+    const before = workspace;
     try {
       capture();
       for (const buffer of [...workspace.buffers]) {
@@ -1138,8 +1146,12 @@
         } else {
           capture();
           const latest = workspace.buffers.find(b => b.id === buffer.id);
-          if (latest && latest.revision === buffer.revision) patch(buffer.id, { external: next.external,
-            ...(!files.modified(latest) ? { revision: next.revision, baseline: next.baseline } : {}) });
+          if (latest && latest.revision === buffer.revision) {
+            const clean = !files.modified(latest);
+            if (latest.external !== next.external || (clean && (latest.revision !== next.revision || latest.baseline !== next.baseline))) {
+              patch(buffer.id, { external: next.external, ...(clean ? { revision: next.revision, baseline: next.baseline } : {}) });
+            }
+          }
         }
       }
       if (workspace.sidebar) await refresh();
@@ -1147,7 +1159,7 @@
         if (active?.path) await refreshVcs();
         await refreshWorkspaceVcs();
       }
-      scheduleRecovery();
+      if (workspace !== before) scheduleRecovery();
     } catch (error) { notice = errorMessage(error); }
     finally { polling = false; }
   }

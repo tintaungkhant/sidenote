@@ -50,7 +50,10 @@ class ImageWidget extends WidgetType {
   private releases = new WeakMap<HTMLElement, () => void>();
   get estimatedHeight() { return this.blockLayout ? 230 : -1; }
   /** Stable identity permits widget reuse across selection changes. */
-  eq(other: ImageWidget): boolean { return this.block === other.block && this.load === other.load && this.open === other.open && this.blockLayout === other.blockLayout; }
+  eq(other: ImageWidget): boolean { return this.block.id === other.block.id && this.block.attachmentId === other.block.attachmentId
+    && this.block.annotations.length === other.block.annotations.length
+    && this.block.annotations.every((annotation, index) => annotation === other.block.annotations[index])
+    && this.load === other.load && this.open === other.open && this.blockLayout === other.blockLayout; }
   /** Load only mounted widgets; each widget owns and revokes its object URL. */
   toDOM(): HTMLElement {
     const image = document.createElement('img');

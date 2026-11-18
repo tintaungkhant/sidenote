@@ -26,8 +26,11 @@ for (const orientation of ['landscape', 'portrait']) test(`${orientation}: line 
   await expect(page.locator('.note-image-caption')).toHaveText('Preview caption — entire image visible');
   await page.getByRole('button', { name: 'Annotate image' }).click();
   expect(await page.evaluate(() => (window as any).openedImage.attachmentId)).toBe('./assets/example.png');
+  const imageUrl = await page.locator('.note-image').getAttribute('src');
   await page.evaluate(() => (window as any).insertAbove());
   await expectAligned(page);
+  expect(await page.evaluate(() => (window as any).imageLoadCount())).toBe(1);
+  await expect(page.locator('.note-image')).toHaveAttribute('src', imageUrl!);
   await page.evaluate(() => (window as any).resizeEditor());
   await expectAligned(page);
   const preview = await page.locator('.note-image-button').boundingBox();

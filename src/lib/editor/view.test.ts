@@ -3,7 +3,8 @@ import { EditorState } from '@codemirror/state';
 import { SearchQuery, search, setSearchQuery } from '@codemirror/search';
 import { EditorView, type DecorationSet } from '@codemirror/view';
 import { createNoteState } from './state';
-import { buildSearchDecorations, imagePresentation } from './view';
+import { buildSearchDecorations, imagePresentation, referencePresentation } from './view';
+import { referenceState, setMetadata } from './references';
 import type { ImageBlock } from './document';
 
 // Exercise the real decoration widget with a small DOM substitute, including delayed IPC.
@@ -76,4 +77,24 @@ test('search decorations highlight all matches and mark selected match without o
     effects: setSearchQuery.of(new SearchQuery({ search: '', literal: true })),
   }).state;
   expect(buildSearchDecorations(cleared, [{ from: 0, to: cleared.doc.length }]).size).toBe(0);
+});
+
+
+test('reference previews reuse decoded images on text edits but refresh changed annotations', () => {
+  const load = async () => new Blob(['image']);
+  const metadata = { version: 1 as const, images: { './a.png': { id: 'image', annotations: [] } } };
+  const initial = referenceState('[image:./a.png]\ntext', metadata, referencePresentation('plaintext', load, () => {}));
+  const widget = (state: EditorState) => {
+    for (const decoration of state.facet(EditorView.decorations)) {
+      if (typeof decoration !== 'function') {
+        const value = decoration.iter().value;
+        if (value?.spec.widget) return value.spec.widget;
+      }
+    }
+    throw new Error('Expected a preview widget');
+  };
+  const edited = initial.update({ changes: { from: initial.doc.length, insert: ' edited' } }).state;
+  expect(widget(initial).eq(widget(edited))).toBe(true);
+  const annotated = edited.update({ effects: setMetadata.of({ version: 1, images: { './a.png': { id: 'image', annotations: [{ kind: 'caption', text: 'new caption' }] } } }) }).state;
+  expect(widget(edited).eq(widget(annotated))).toBe(false);
 });

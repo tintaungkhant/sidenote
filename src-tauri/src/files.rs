@@ -1176,8 +1176,12 @@ fn browse(root: &Path, query: &str) -> Result<Value> {
         }
         let mut children = fs::read_dir(path)
             .map_err(fail)?
+            .take(20001usize.saturating_sub(*visited))
             .collect::<std::io::Result<Vec<_>>>()
             .map_err(fail)?;
+        if children.len() + *visited > 20000 {
+            return Err(fail("Folder exceeds 20,000 entries; open a smaller folder"));
+        }
         children.sort_by_key(|e| e.file_name());
         for entry in children {
             *visited += 1;
@@ -1224,7 +1228,7 @@ fn browse(root: &Path, query: &str) -> Result<Value> {
                             continue;
                         }
                         for (index, line) in source.lines().enumerate() {
-                            if line.to_lowercase().contains(&query.to_lowercase()) {
+                            if line.to_lowercase().contains(query) {
                                 entries.push(json!({
                                     "path": main_path,
                                     "relative": main_relative,
@@ -1260,7 +1264,7 @@ fn browse(root: &Path, query: &str) -> Result<Value> {
                         continue;
                     }
                     for (index, line) in source.lines().enumerate() {
-                        if line.to_lowercase().contains(&query.to_lowercase()) {
+                        if line.to_lowercase().contains(query) {
                             entries.push(json!({"path":p,"relative":relative,"directory":false,"line":index+1,"preview":line.chars().take(240).collect::<String>()}));
                             if entries.len() >= 10000 {
                                 return Err(fail(
@@ -1275,7 +1279,7 @@ fn browse(root: &Path, query: &str) -> Result<Value> {
         Ok(())
     }
     let mut entries = Vec::new();
-    visit(root, root, query, &mut entries, &mut 0, 0)?;
+    visit(root, root, &query.to_lowercase(), &mut entries, &mut 0, 0)?;
     Ok(json!(entries))
 }
 #[tauri::command]
