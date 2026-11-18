@@ -23,6 +23,38 @@ export function preferredFileName(buffer: Pick<Buffer, 'path' | 'name'>): string
   const raw = (buffer.path?.split(/[/\\]/).at(-1) ?? buffer.name ?? 'Untitled-1').trim() || 'Untitled-1';
   return raw.includes('.') ? raw : `${raw}.md`;
 }
+export function suggestSaveName(
+  buffer: Pick<Buffer, 'id' | 'path' | 'name'>,
+  buffers: readonly Pick<Buffer, 'id' | 'path' | 'name'>[] = [],
+  entries: readonly Pick<Entry, 'relative' | 'directory' | 'package'>[] = [],
+): string {
+  const others = buffers.filter(b => b.id !== buffer.id);
+  const raw = (buffer.path?.split(/[/\\]/).at(-1) ?? buffer.name ?? '').trim() || nextUntitledName(others, entries);
+  const dot = raw.lastIndexOf('.');
+  const hasExt = dot > 0 && dot < raw.length - 1;
+  const stem = hasExt ? raw.slice(0, dot) : raw;
+  const ext = hasExt ? raw.slice(dot + 1) : 'md';
+  const takenTop = new Set(entries.map(e => e.relative.split('/')[0].toLowerCase()).filter(Boolean));
+  const isTaken = (s: string) => {
+    const sl = s.toLowerCase(), el = ext.toLowerCase();
+    return takenTop.has(sl) || takenTop.has(`${sl}.${el}`) || takenTop.has(`${sl}.${el}.simple-note.json`);
+  };
+  if (!isTaken(stem)) return hasExt ? `${stem}.${ext}` : stem;
+  if (/^untitled(?:-\d+)?$/i.test(stem)) {
+    let fresh = nextUntitledName(others, entries);
+    const match = /^untitled-(\d+)$/i.exec(fresh);
+    let n = match ? Number(match[1]) : 1;
+    while (isTaken(fresh)) {
+      n += 1;
+      fresh = `Untitled-${n}`;
+    }
+    return hasExt ? `${fresh}.${ext}` : fresh;
+  }
+  const base = stem.replace(/-\d+$/, '') || stem;
+  let n = 1;
+  while (isTaken(`${base}-${n}`)) n += 1;
+  return hasExt ? `${base}-${n}.${ext}` : `${base}-${n}`;
+}
 export function nextUntitledName(buffers: readonly Pick<Buffer, 'path' | 'name'>[], entries: readonly Pick<Entry, 'relative' | 'directory' | 'package'>[] = []): string {
   const taken = new Set<number>();
   const record = (raw: string | undefined) => {

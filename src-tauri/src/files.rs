@@ -511,6 +511,7 @@ impl FileStore {
         metadata: &Value,
         origin: Option<&Path>,
         assets: &[SourceReference],
+        exact: bool,
     ) -> Result<DiskDocument> {
         validate_metadata(metadata)?;
         if source.len() as u64 > MAX_TEXT {
@@ -523,6 +524,8 @@ impl FileStore {
         let (stem, ext) = sanitize_stem_ext(preferred)?;
         let chosen_stem = if is_stem_available_in_root(&root, &stem, &ext)? {
             stem
+        } else if exact {
+            return Err(fail("A note with that name already exists"));
         } else {
             let base = strip_numeric_suffix(&stem);
             let mut found = None;
@@ -955,6 +958,8 @@ pub enum Operation {
         metadata: Value,
         origin: Option<String>,
         assets: Vec<SourceReference>,
+        #[serde(default)]
+        exact: bool,
     },
     Rename {
         root: String,
@@ -1298,13 +1303,15 @@ pub async fn file_operation(
                 metadata,
                 origin,
                 assets,
+                exact,
             } => Ok(json!(store.create_in_root(
                 Path::new(&root),
                 preferred.as_deref(),
                 &text,
                 &metadata,
                 origin.as_deref().map(Path::new),
-                &assets
+                &assets,
+                exact,
             )?)),
             Operation::Rename { root, path, name } => Ok(json!(store.rename(
                 Path::new(&root),
@@ -1674,6 +1681,7 @@ mod tests {
                 &metadata(path),
                 None,
                 &[reference(&source, path)],
+                false,
             )
             .unwrap();
         assert_eq!(first.text, "First note\n![image](./assets/a.png)\n");
@@ -1684,6 +1692,19 @@ mod tests {
         assert!(root.join("Untitled-1/assets/a.png").exists());
         assert_eq!(first.metadata["main"], "Untitled-1.md");
         let empty = json!({"version":1,"images":{}});
+        assert!(
+            store
+                .create_in_root(
+                    &root,
+                    Some("Untitled-1.md"),
+                    "collision",
+                    &empty,
+                    None,
+                    &[],
+                    true,
+                )
+                .is_err()
+        );
         let second = store
             .create_in_root(
                 &root,
@@ -1692,6 +1713,7 @@ mod tests {
                 &empty,
                 None,
                 &[],
+                false,
             )
             .unwrap();
         assert!(root.join("Untitled-2/Untitled-2.md").exists());
@@ -1738,11 +1760,12 @@ mod tests {
                 &metadata(rec_path),
                 None,
                 &[reference(&source, rec_path)],
+                false,
             )
             .unwrap();
         let empty = json!({"version":1,"images":{}});
         store
-            .create_in_root(&root, Some("taken.md"), "taken", &empty, None, &[])
+            .create_in_root(&root, Some("taken.md"), "taken", &empty, None, &[], false)
             .unwrap();
         let renamed = store
             .rename(&root, Path::new(&doc.path), "sample.md")
@@ -1844,6 +1867,7 @@ mod tests {
                 &metadata(rec_path),
                 None,
                 &[reference(&source, rec_path)],
+                false,
             )
             .unwrap();
         assert!(root.join("note-a/assets/a.png").exists());

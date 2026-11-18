@@ -2,7 +2,7 @@ import { test, expect } from 'bun:test';
 import {
   untitled, opened, modified, closeDecision, fingerprint, reconcile, removeBuffer, languageFor, recovered,
   nextUntitledName, withinRoot, samePath, relativeToRoot, displayPath, searchWorkspace, bufferLanguage,
-  preferredFileName, validateFileName, compactNotePath, entryDepth, entryLabel, highlightText, groupSearchMatches, type Workspace
+  preferredFileName, suggestSaveName, validateFileName, compactNotePath, entryDepth, entryLabel, highlightText, groupSearchMatches, type Workspace
 } from './files';
 
 test('Untitled, explicit save acknowledgement, modification, close and cancellation decisions', () => {
@@ -147,4 +147,19 @@ test('highlightText splits case-insensitive matches safely and groupSearchMatche
   expect(grouped[0].matches.map(m => m.line)).toEqual([1, 3]);
   expect(grouped[1]).toMatchObject({ key: 'disk:c:/notes/a/a.md', label: 'a.md', unsaved: false });
   expect(grouped[1].matches.map(m => m.line)).toEqual([2, 5]);
+});
+test('suggestSaveName returns prefilled unsaved names and avoids root collisions', () => {
+  const first = untitled('Untitled-1');
+  const second = untitled('Untitled-2');
+  expect(suggestSaveName(first, [first], [])).toBe('Untitled-1');
+  expect(suggestSaveName(second, [first, second], [{ relative: 'Untitled-1/Untitled-1.md', directory: false, package: true }])).toBe('Untitled-2');
+  expect(
+    suggestSaveName(first, [first, second], [{ relative: 'Untitled-1/Untitled-1.md', directory: false, package: true }])
+  ).toBe('Untitled-3');
+  const script = untitled('script.ts');
+  expect(suggestSaveName(script, [script], [])).toBe('script.ts');
+  const existing = opened({ path: 'C:\\notes\\sample\\sample.md', text: 'hi', metadata: untitled().metadata, revision: '1' });
+  expect(
+    suggestSaveName(existing, [existing], [{ relative: 'sample/sample.md', directory: false, package: true }])
+  ).toBe('sample-1.md');
 });

@@ -47,6 +47,10 @@
   let closeDialog: HTMLDialogElement;
   let deleteTarget = $state<{ path: string; name: string } | null>(null);
   let deleteDialog: HTMLDialogElement;
+  let savePrompt = $state<{ id: string; saveCopy: boolean; closeAfter: boolean } | null>(null);
+  let saveName = $state('');
+  let saveError = $state('');
+  let saveDialog: HTMLDialogElement;
   let annotation = $state.raw<{ block: ImageBlock; blob: Blob } | undefined>();
   let closed: files.Buffer[] = [];
   let snapshotQueue: Promise<void> = Promise.resolve();
@@ -265,26 +269,24 @@
     if (language !== 'plaintext' && !ensureSyntaxTree(state,state.doc.length,1000)) throw new Error('Source parsing is incomplete. Try saving again.');
     return sourceImages(state,language).map(image => ({ from: image.from, to: image.to, path: image.block.attachmentId }));
   }
-  async function saveFile(id = workspace.active, saveCopy = false): Promise<boolean> {
-    capture();
-    const buffer = workspace.buffers.find(b => b.id === id);
-    if (!buffer) return false;
-    let rootPath = workspace.root;
-    if (!rootPath) {
-      const picked = await files.picker('folder');
-      if (!picked) return false;
-      applyRootFolder(picked, buffer.id);
-      await migrateWorkspaceRoot(picked);
-      rootPath = picked;
-    }
-    const current = workspace.buffers.find(b => b.id === id);
-    if (!current) return false;
+  async function focusSaveInput() {
+    await tick();
+    const input = document.getElementById('save-name-input') as HTMLInputElement | null;
+    if (!input) return;
+    input.focus();
+    const dot = saveName.lastIndexOf('.');
+    input.setSelectionRange(0, dot > 0 ? dot : saveName.length);
+  }
+  async function commitBufferSave(
+    current: files.Buffer,
+    rootPath: string,
+    createOpts?: { targetName: string; exact: boolean },
+  ): Promise<void> {
     // Recovery must succeed before a multi-file save; a partial disk failure remains recoverable.
     await checkpoint();
     let disk: files.DiskDocument;
-    const createInRoot = saveCopy || !current.path || current.external === 'deleted' || !files.withinRoot(current.path, rootPath);
-    if (createInRoot) {
-      const targetName = files.preferredFileName(current);
+    if (createOpts) {
+      const targetName = createOpts.targetName;
       const targetPath = `${rootPath.replace(/[/\\]+$/, '')}/${targetName}`;
       const targetLanguage = files.languageFor(targetName);
       const oldLanguage = files.bufferLanguage(current);
@@ -322,6 +324,7 @@
         kind: 'createInRoot',
         root: rootPath,
         preferred: targetName,
+        exact: createOpts.exact,
         text: source,
         metadata: current.metadata,
         origin: current.path?.replace(/[/\\][^/\\]+$/, '') ?? null,
@@ -341,7 +344,75 @@
     await refresh();
     await checkpoint();
     notice = `Saved ${files.title(workspace.buffers.find(b => b.id === current.id) ?? current)}.`;
-    return true;
+  }
+  async function saveFile(id = workspace.active, saveCopy = false, closeAfter = false): Promise<boolean> {
+    capture();
+    const buffer = workspace.buffers.find(b => b.id === id);
+    if (!buffer) return false;
+    if (renamingTarget) renamingTarget = null;
+    let rootPath = workspace.root;
+    if (!rootPath) {
+      const picked = await files.picker('folder');
+      if (!picked) return false;
+      applyRootFolder(picked, buffer.id);
+      await migrateWorkspaceRoot(picked);
+      await refresh();
+      rootPath = picked;
+    } else if (!workspace.sidebar) {
+      explorerEntries = await files.operation<files.Entry[]>({ kind: 'browse', root: rootPath, query: '' });
+    }
+    const current = workspace.buffers.find(b => b.id === id);
+    if (!current) return false;
+    const createInRoot = saveCopy || !current.path || current.external === 'deleted' || !files.withinRoot(current.path, rootPath);
+    if (!createInRoot) {
+      await commitBufferSave(current, rootPath);
+      return true;
+    }
+    if (closeDialog?.open) { closeDialog.close(); closeTarget = null; }
+    const initial = files.suggestSaveName(current, workspace.buffers, explorerEntries);
+    savePrompt = { id: current.id, saveCopy, closeAfter };
+    saveName = initial;
+    saveError = '';
+    saveDialog.showModal();
+    await focusSaveInput();
+    return false;
+  }
+  function cancelSavePrompt() {
+    if (busy) return;
+    saveDialog.close();
+    savePrompt = null;
+    saveError = '';
+    view?.focus();
+  }
+  function confirmSavePrompt() {
+    if (!savePrompt || busy || frozen) return;
+    const prompt = savePrompt;
+    run(async () => {
+      try {
+        capture();
+        const current = workspace.buffers.find(b => b.id === prompt.id);
+        const rootPath = workspace.root;
+        if (!current || !rootPath) {
+          if (saveDialog?.open) saveDialog.close();
+          savePrompt = null;
+          saveError = '';
+          return;
+        }
+        const prev = current.path?.split(/[/\\]/).at(-1) ?? current.name ?? '';
+        const dot = prev.lastIndexOf('.');
+        const fallbackExt = dot > 0 && dot < prev.length - 1 ? prev.slice(dot + 1) : 'md';
+        const targetName = files.validateFileName(saveName, fallbackExt);
+        await commitBufferSave(current, rootPath, { targetName, exact: true });
+        if (saveDialog?.open) saveDialog.close();
+        savePrompt = null;
+        saveError = '';
+        if (prompt.closeAfter) await removeOpenBuffer(prompt.id);
+        else view?.focus();
+      } catch (error) {
+        saveError = errorMessage(error);
+      }
+    });
+    void action.then(() => { if (savePrompt) void focusSaveInput(); });
   }
   async function ensureExplorerVisible() {
     if (!workspace.sidebar || panel !== 'explorer') {
@@ -501,23 +572,29 @@
     if (renamingTarget.kind === 'path') return files.samePath(renamingTarget.path, entry.path);
     return Boolean(openBuffer && !files.isUnsavedBuffer(openBuffer, workspace.root) && renamingTarget.id === openBuffer.id);
   }
-  async function closeFile(id: string, choice?: 'save' | 'discard') {
+  async function removeOpenBuffer(id: string) {
     capture();
     const buffer = workspace.buffers.find(b => b.id === id);
     if (!buffer) return;
-    if (!choice && files.closeDecision(buffer) === 'prompt') { closeTarget = id; closeDialog.showModal(); return; }
-    if (choice === 'save' && !await saveFile(id)) return;
-    capture();
     const previous = workspace;
     if (renamingTarget?.kind === 'buffer' && renamingTarget.id === id) renamingTarget = null;
     if (viewId === id) unmount();
     workspace = files.removeBuffer(workspace, id);
     states.delete(id);
-    closeDialog.close(); closeTarget = null;
+    if (closeDialog?.open) closeDialog.close();
+    closeTarget = null;
     mount(workspace.active);
     try { await checkpoint(); }
     catch (error) { unmount(); workspace = previous; mount(previous.active); throw error; }
     closed.push(buffer.path ? { ...buffer, baseline: buffer.baseline } : files.untitled());
+  }
+  async function closeFile(id: string, choice?: 'save' | 'discard') {
+    capture();
+    const buffer = workspace.buffers.find(b => b.id === id);
+    if (!buffer) return;
+    if (!choice && files.closeDecision(buffer) === 'prompt') { closeTarget = id; closeDialog.showModal(); return; }
+    if (choice === 'save' && !await saveFile(id, false, true)) return;
+    await removeOpenBuffer(id);
   }
   async function reopen() {
     const buffer = closed.at(-1);
@@ -627,7 +704,7 @@
     unmount(); states.delete(id); patch(id, { ...disk, baseline: files.fingerprint(disk.text, disk.metadata), external: null }); mount(id); await checkpoint();
   }
   async function poll() {
-    if (polling || busy || frozen || loading || annotation || renamingTarget || startupError) return;
+    if (polling || busy || frozen || loading || annotation || renamingTarget || savePrompt || startupError) return;
     polling = true;
     try {
       capture();
@@ -664,6 +741,8 @@
   async function exit() {
     if (exitWork) return exitWork;
     frozen = true;
+    if (saveDialog?.open) saveDialog.close();
+    savePrompt = null;
     view?.contentDOM.blur();
     view?.dispatch({ effects: editable.reconfigure(EditorView.editable.of(false)) });
     exitWork = (async () => {
@@ -689,7 +768,7 @@
   function command(work: () => Promise<void> | void) { document.querySelectorAll<HTMLElement>('.command-menu').forEach(m => m.hidePopover()); run(work); }
   async function showContextMenu(x: number, y: number, items: MenuEntry[]) {
     document.querySelectorAll<HTMLElement>('.command-menu').forEach(m => m.hidePopover());
-    if (!items.length || busy || frozen || loading || annotation || closeDialog?.open || deleteDialog?.open) return;
+    if (!items.length || busy || frozen || loading || annotation || closeDialog?.open || deleteDialog?.open || saveDialog?.open) return;
     contextItems = items;
     await tick();
     if (!contextPopover) return;
@@ -926,14 +1005,14 @@
   }
   function onWindowContextMenu(event: MouseEvent) {
     event.preventDefault();
-    if (annotation || closeDialog?.open || deleteDialog?.open) return;
+    if (annotation || closeDialog?.open || deleteDialog?.open || saveDialog?.open) return;
     const target = event.target;
     if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
       void showContextMenu(event.clientX, event.clientY, inputMenuItems(target));
     }
   }
   function shortcut(event: KeyboardEvent) {
-    if (annotation || closeDialog?.open || deleteDialog?.open || event.isComposing || event.altKey && event.key.toLowerCase() !== 'z') return;
+    if (annotation || closeDialog?.open || deleteDialog?.open || saveDialog?.open || event.isComposing || event.altKey && event.key.toLowerCase() !== 'z') return;
     const key = event.key.toLowerCase();
     if ((event.ctrlKey || event.metaKey) && (key === 's' || key === 'o')) { event.preventDefault(); run(() => key === 's' ? saveFile(workspace.active,event.shiftKey).then(() => {}) : setRootFolder()); return; }
     if (event.key === 'F2' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && workspace.active && !renamingTarget && !busy && !frozen) { event.preventDefault(); run(() => beginRename(workspace.active)); return; }
@@ -1152,5 +1231,13 @@
 <dialog bind:this={deleteDialog} class="settings-dialog" aria-labelledby="delete-heading" oncancel={() => { deleteTarget = null; }}>
   <h2 id="delete-heading">Delete {deleteTarget?.name ?? ''}?</h2>
   <div class="dialog-actions"><button disabled={busy} onclick={() => run(confirmDelete)}>Delete</button><button disabled={busy} onclick={() => { deleteDialog.close(); deleteTarget = null; }}>Cancel</button></div>
+</dialog>
+<dialog bind:this={saveDialog} class="settings-dialog save-dialog" aria-labelledby="save-heading" oncancel={event => { if (busy) { event.preventDefault(); return; } savePrompt = null; saveError = ''; view?.focus(); }}>
+  <form class="save-dialog-form" onsubmit={event => { event.preventDefault(); confirmSavePrompt(); }}>
+    <h2 id="save-heading">{savePrompt?.saveCopy ? 'Save copy' : 'Save file'}</h2>
+    <input id="save-name-input" aria-label="File name" bind:value={saveName} readonly={busy} spellcheck="false" autocomplete="off" oninput={() => { if (saveError) saveError = ''; }} />
+    {#if saveError}<p role="alert" class="save-dialog-error">{saveError}</p>{/if}
+    <div class="dialog-actions"><button type="button" disabled={busy} onclick={cancelSavePrompt}>Cancel</button><button type="submit" class="header-btn-primary" disabled={busy}>Save</button></div>
+  </form>
 </dialog>
 {#if annotation}<AnnotationEditor block={annotation.block} blob={annotation.blob} status={recoveryError} onchange={annotate} onoutput={outputAnnotation} onclose={() => { annotation = undefined; view?.focus(); }}/>{/if}
