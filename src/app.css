@@ -412,6 +412,22 @@ fieldset {
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+.activity-badge {
+  position: absolute;
+  top: 5px;
+  right: 7px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: #6366f1;
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 15px;
+  text-align: center;
+  pointer-events: none;
+}
 .activity-bar-bottom {
   margin-top: auto;
   display: flex;
@@ -1077,16 +1093,121 @@ mark.search-match-mark {
   margin-bottom: 6px;
   border-bottom: 1px solid var(--border);
 }
-#sidebar-commit-input {
-  width: 100%;
-  font-size: 12px;
-  padding: 5px 8px;
-}
 .vcs-commit-submit {
   width: 100%;
   padding: 5px 8px;
   font-size: 12px;
   font-weight: 500;
+}
+
+/* VS Code Multi-repo / Multi-file Source Control Card */
+.vcs-repo-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 4px 8px;
+  border-bottom: 1px solid var(--border);
+  transition: background 120ms ease;
+}
+.vcs-repo-card.current {
+  background: rgba(99, 102, 241, 0.05);
+}
+.vcs-repo-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  color: var(--text-primary);
+  min-height: 24px;
+}
+.vcs-repo-chevron {
+  font-size: 10px;
+  color: var(--text-muted);
+  width: 12px;
+  display: inline-flex;
+  justify-content: center;
+}
+.vcs-repo-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vcs-repo-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.vcs-repo-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.vcs-repo-pair {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 2px 4px 16px;
+}
+.vcs-repo-input-wrap {
+  width: 100%;
+}
+.vcs-repo-msg-input {
+  width: 100%;
+  height: 28px;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: #14151a;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  outline: none;
+  transition: border-color 120ms ease;
+}
+.vcs-repo-msg-input:focus {
+  border-color: #6366f1;
+}
+.vcs-repo-msg-input::placeholder {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.vcs-repo-commit-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #ffffff;
+  background: #238636;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 120ms ease, opacity 120ms ease;
+}
+.vcs-repo-commit-btn:hover:not(:disabled) {
+  background: #2ea043;
+}
+.vcs-repo-commit-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.vcs-repo-files {
+  padding-left: 14px;
 }
 .vcs-change-row {
   display: flex;
@@ -1103,6 +1224,85 @@ mark.search-match-mark {
 }
 .vcs-change-row.current {
   background: rgba(99, 102, 241, 0.16);
+}
+.vcs-change-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 28px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  text-align: left;
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+  user-select: none;
+  border: 1px solid transparent;
+  transition: background 100ms ease;
+}
+.vcs-change-tree-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.vcs-change-tree-row.current {
+  background: linear-gradient(90deg, rgba(99, 102, 241, 0.16) 0%, rgba(99, 102, 241, 0.03) 100%);
+  border-left: 2px solid #6366f1;
+  color: #ffffff;
+}
+.vcs-change-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.vcs-change-label {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+.vcs-change-title {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vcs-change-subpath {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vcs-change-actions {
+  display: none;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.vcs-change-tree-row:hover .vcs-change-actions,
+.vcs-change-tree-row.current .vcs-change-actions {
+  display: flex;
+}
+.vcs-row-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.vcs-row-btn:hover {
+  background: var(--border);
+  color: var(--text-primary);
 }
 .vcs-change-badge {
   font-family: ui-monospace, SFMono-Regular, monospace;
@@ -1194,6 +1394,76 @@ mark.search-match-mark {
   font-family: ui-monospace, SFMono-Regular, monospace;
   font-size: 10px;
   color: #a5b4fc;
+}
+.vcs-commit-row.uncommitted .vcs-commit-dot {
+  background: #f59e0b;
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.4);
+}
+.vcs-commit-row.uncommitted:hover {
+  background: rgba(245, 158, 11, 0.08);
+}
+.vcs-commit-row.uncommitted.selected {
+  background: rgba(245, 158, 11, 0.16);
+}
+
+.vcs-timeline-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  margin: 4px 8px 8px 8px;
+}
+.vcs-timeline-target {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+.vcs-timeline-file-icon {
+  display: flex;
+  align-items: center;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.vcs-timeline-note-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vcs-timeline-notes-list {
+  display: flex;
+  flex-direction: column;
+  padding: 2px 4px;
+}
+.vcs-timeline-note-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.vcs-timeline-note-row:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.vcs-timeline-note-row.active {
+  background: rgba(99, 102, 241, 0.15);
+  color: var(--text-primary);
+  font-weight: 500;
 }
 
 /* VS Code-style Inline Diff Viewer */

@@ -72,3 +72,23 @@ test('tab activation measures a previously hidden editor', async ({ page }) => {
   await expect(page.locator('.note-image')).toBeVisible();
   await expectAligned(page);
 });
+
+test('CRLF line endings keep lines distinct without overlapping line numbers', async ({ page }) => {
+  await page.goto('/tests/fixtures/editor-layout.html?short');
+  await page.evaluate(() => {
+    const view = (window as any).view;
+    const crlfText = '# File editor smoke test\r\n\r\n![image](./assets/example.png)\r\n\r\nExternal clean-buffer reload verified';
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: crlfText } });
+  });
+  await page.evaluate(() => (window as any).finishImage());
+  await expect(page.locator('.note-image')).toBeVisible();
+  await expectAligned(page);
+  const tops = await page.evaluate(() => {
+    return [...document.querySelectorAll('.cm-lineNumbers .cm-gutterElement')]
+      .filter(el => /^\d+$/.test(el.textContent || ''))
+      .map(el => el.getBoundingClientRect().top);
+  });
+  for (let i = 1; i < tops.length; i++) {
+    expect(tops[i]).toBeGreaterThan(tops[i - 1]);
+  }
+});

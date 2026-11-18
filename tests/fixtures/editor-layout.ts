@@ -26,6 +26,7 @@ const view = new EditorView({ parent: document.getElementById('editor')!, state:
 ) });
 
 Object.assign(window, {
+  view,
   revealEditor: () => { host.style.display = ''; },
   finishImage: async () => finish(await image),
   failImage: () => fail(new Error('Missing image')),

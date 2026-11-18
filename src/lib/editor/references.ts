@@ -28,7 +28,7 @@ export const setMetadata = StateEffect.define<Metadata>();
 export const metadataField = StateField.define<Metadata>({ create: () => ({ version: 1, images: {} }), update: (value, tr) => tr.effects.find(e => e.is(setMetadata))?.value ?? value });
 export const metadataHistory = invertedEffects.of(tr => tr.effects.some(e => e.is(setMetadata)) ? [setMetadata.of(tr.startState.field(metadataField))] : []);
 export function referenceState(text: string, metadata: Metadata, extensions: Extension): EditorState {
-  return EditorState.create({ doc: text, extensions: [EditorState.lineSeparator.of('\n'), history(), metadataField.init(() => metadata), metadataHistory, extensions] });
+  return EditorState.create({ doc: text, extensions: [history(), metadataField.init(() => metadata), metadataHistory, extensions] });
 }
 /** Render only real comment syntax in code, ignoring marker-shaped strings and template literals. */
 export function sourceImages(state: EditorState, language: Language): (PlacedImage & { to: number })[] {

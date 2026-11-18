@@ -1,5 +1,15 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { DiskDocument } from './files';
+import type { Buffer, DiskDocument } from './files';
+import {
+  compactNotePath,
+  isUnsavedBuffer,
+  modified,
+  normalizePath,
+  relativeToRoot,
+  samePath,
+  title,
+  withinRoot,
+} from './files';
 
 export type CommitEntry = {
   hash: string;
@@ -14,7 +24,36 @@ export type VcsStatus = {
   supported: boolean;
   initialized: boolean;
   dirty: boolean;
+  branch?: string;
   commits: CommitEntry[];
+};
+
+export type VcsNoteStatus = {
+  path: string;
+  relative: string;
+  name: string;
+  initialized: boolean;
+  dirty: boolean;
+  branch?: string;
+};
+
+export type VcsWorkspaceStatus = {
+  available: boolean;
+  notes: VcsNoteStatus[];
+};
+
+export type WorkspaceChange = {
+  key: string;
+  path?: string;
+  bufferId?: string;
+  title: string;
+  relative: string;
+  subpath?: string;
+  branch?: string;
+  status: 'modified' | 'untracked';
+  dirty: boolean;
+  initialized: boolean;
+  isUnsaved: boolean;
 };
 
 export type VcsDiffPayload = {
@@ -44,6 +83,9 @@ export const checkGit = (): Promise<{ available: boolean; version: string | null
 export const vcsStatus = (root: string, path: string): Promise<VcsStatus> =>
   invoke('vcs_operation', { operation: { kind: 'status', root, path } });
 
+export const vcsWorkspaceStatus = (root: string): Promise<VcsWorkspaceStatus> =>
+  invoke('vcs_operation', { operation: { kind: 'workspaceStatus', root } });
+
 export const vcsCommit = (root: string, path: string, message: string): Promise<VcsStatus> =>
   invoke('vcs_operation', { operation: { kind: 'commit', root, path, message } });
 
@@ -58,12 +100,118 @@ export const vcsDiff = (
 export const vcsRestore = (root: string, path: string, hash: string): Promise<DiskDocument> =>
   invoke('vcs_operation', { operation: { kind: 'restore', root, path, hash } });
 
+export const vcsDiscard = (root: string, path: string): Promise<VcsStatus> =>
+  invoke('vcs_operation', { operation: { kind: 'discard', root, path } });
+
 export function defaultCommitMessage(initialized: boolean): string {
   return initialized ? 'Update note' : 'Initial commit';
 }
 
 export function resolveCommitMessage(raw: string, initialized: boolean): string {
   return raw.trim() || defaultCommitMessage(initialized);
+}
+
+export function hasChangesToCommit(params: {
+  gitAvailable?: boolean | null;
+  status: VcsStatus | null;
+  isModified: boolean;
+  isWithinRoot: boolean;
+  hasText: boolean;
+  isDeleted?: boolean;
+}): boolean {
+  if (params.gitAvailable === false || params.isDeleted) return false;
+  if (params.isModified) return true;
+  if (params.isWithinRoot) {
+    if (!params.status) return false;
+    return !params.status.initialized || params.status.dirty;
+  }
+  return params.hasText;
+}
+
+export function buildWorkspaceChanges(params: {
+  gitAvailable?: boolean | null;
+  root: string | null;
+  buffers: readonly Pick<Buffer, 'id' | 'path' | 'name' | 'text' | 'metadata' | 'baseline' | 'external'>[];
+  workspaceNotes: readonly VcsNoteStatus[];
+}): WorkspaceChange[] {
+  if (!params.root || params.gitAvailable === false) return [];
+  const results: WorkspaceChange[] = [];
+  const seenPaths = new Set<string>();
+
+  // 1. Open unsaved buffers (no disk path yet or outside root)
+  for (const buffer of params.buffers) {
+    if (isUnsavedBuffer(buffer, params.root)) {
+      if (buffer.text.length > 0 || modified(buffer as Buffer)) {
+        results.push({
+          key: `buf:${buffer.id}`,
+          bufferId: buffer.id,
+          title: title(buffer as Buffer),
+          relative: title(buffer as Buffer),
+          branch: 'main',
+          status: 'untracked',
+          dirty: true,
+          initialized: false,
+          isUnsaved: true,
+        });
+      }
+    }
+  }
+
+  // 2. Saved notes discovered in workspace root
+  for (const note of params.workspaceNotes) {
+    seenPaths.add(normalizePath(note.path).toLowerCase());
+    const openBuffer = params.buffers.find(b => b.path && samePath(b.path, note.path));
+    const inRamModified = openBuffer ? modified(openBuffer as Buffer) : false;
+    const isDirty = note.dirty || inRamModified;
+    const isInitialized = note.initialized;
+    if (isDirty || !isInitialized) {
+      const compacted = compactNotePath(note.relative);
+      const parts = compacted.split('/');
+      const subpath = parts.length > 1 ? parts.slice(0, -1).join('/') : undefined;
+      results.push({
+        key: `disk:${note.path}`,
+        path: note.path,
+        bufferId: openBuffer?.id,
+        title: note.name,
+        relative: compacted,
+        subpath,
+        branch: note.branch || 'main',
+        status: isInitialized ? 'modified' : 'untracked',
+        dirty: isDirty,
+        initialized: isInitialized,
+        isUnsaved: false,
+      });
+    }
+  }
+
+  // 3. Any other open buffers inside root not present in workspaceNotes (e.g. freshly created)
+  for (const buffer of params.buffers) {
+    if (buffer.path && withinRoot(buffer.path, params.root) && buffer.external !== 'deleted') {
+      const norm = normalizePath(buffer.path).toLowerCase();
+      if (!seenPaths.has(norm)) {
+        if (modified(buffer as Buffer)) {
+          const rel = compactNotePath(relativeToRoot(buffer.path, params.root));
+          const parts = rel.split('/');
+          const subpath = parts.length > 1 ? parts.slice(0, -1).join('/') : undefined;
+          results.push({
+            key: `buf:${buffer.id}`,
+            bufferId: buffer.id,
+            path: buffer.path,
+            title: title(buffer as Buffer),
+            relative: rel,
+            subpath,
+            branch: 'main',
+            status: 'modified',
+            dirty: true,
+            initialized: false,
+            isUnsaved: false,
+          });
+        }
+      }
+    }
+  }
+
+  return results;
 }
 
 export function formatRelativeTime(unixSeconds: number, nowMs = Date.now()): string {

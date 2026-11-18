@@ -170,6 +170,9 @@ pub enum VcsOperation {
         root: String,
         path: String,
     },
+    WorkspaceStatus {
+        root: String,
+    },
     Commit {
         root: String,
         path: String,
@@ -185,6 +188,10 @@ pub enum VcsOperation {
         root: String,
         path: String,
         hash: String,
+    },
+    Discard {
+        root: String,
+        path: String,
     },
 }
 
@@ -289,11 +296,31 @@ pub(crate) fn status(root: &Path, path: &Path) -> Result<Value> {
             }
         }
     }
+    let branch = if has_head {
+        run_git(Some(&repo_dir), &["branch", "--show-current"])
+            .ok()
+            .and_then(|out| {
+                if out.status.success() {
+                    let s = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+                    if !s.is_empty() {
+                        Some(s)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "main".to_owned())
+    } else {
+        "main".to_owned()
+    };
     Ok(json!({
         "available": true,
         "supported": true,
         "initialized": has_head,
         "dirty": dirty,
+        "branch": branch,
         "commits": commits
     }))
 }
@@ -490,6 +517,140 @@ pub(crate) fn restore(root: &Path, path: &Path, hash: &str) -> Result<Value> {
     Ok(json!(crate::files::load(&repo_dir.join(&current_main))?))
 }
 
+pub(crate) fn discard(root: &Path, path: &Path) -> Result<Value> {
+    ensure_git()?;
+    let (repo_dir, _) = resolve_note_repo(root, path)?;
+    if !repo_dir.join(".git").exists() || !has_git_head(&repo_dir)? {
+        return Err(fail("Note has no committed history to restore"));
+    }
+    run_git_ok(Some(&repo_dir), &["checkout", "HEAD", "--", "."])?;
+    let _ = run_git(Some(&repo_dir), &["clean", "-fd"]);
+    status(root, path)
+}
+
+pub(crate) fn workspace_status(root: &Path) -> Result<Value> {
+    match run_git(None, &["--version"]) {
+        Ok(out) if out.status.success() => {}
+        Ok(_) => {
+            return Ok(json!({
+                "available": false,
+                "notes": []
+            }));
+        }
+        Err(e) if e.code == "git_missing" => {
+            return Ok(json!({
+                "available": false,
+                "notes": []
+            }));
+        }
+        Err(e) => return Err(e),
+    }
+    let canonical_root = fs::canonicalize(root).map_err(fail)?;
+    if !canonical_root.is_dir() {
+        return Ok(json!({
+            "available": true,
+            "notes": []
+        }));
+    }
+    let mut notes = Vec::new();
+
+    fn scan_dir(dir: &Path, root: &Path, notes: &mut Vec<Value>, depth: usize) {
+        if depth > 64 || notes.len() >= 5000 {
+            return;
+        }
+        let Ok(read_dir) = fs::read_dir(dir) else {
+            return;
+        };
+        let mut subdirs = Vec::new();
+        for entry in read_dir.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() || !file_type.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with('.')
+                || name_str == "node_modules"
+                || name_str == "target"
+                || name_str == "assets"
+            {
+                continue;
+            }
+            let p = entry.path();
+            if let Some(main_name) = crate::files::package_main(&p) {
+                let main_path = p.join(&main_name);
+                let relative = main_path
+                    .strip_prefix(root)
+                    .unwrap_or(&main_path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let git_dir = p.join(".git");
+                let is_git = git_dir.is_dir()
+                    && !fs::symlink_metadata(&git_dir)
+                        .map(|m| m.file_type().is_symlink())
+                        .unwrap_or(false);
+                let (initialized, dirty, branch) = if is_git {
+                    let has_head = has_git_head(&p).unwrap_or(false);
+                    let porcelain = run_git_ok(
+                        Some(&p),
+                        &["status", "--porcelain", "--untracked-files=all"],
+                    );
+                    let is_dirty = match porcelain {
+                        Ok(out) => {
+                            !has_head || !String::from_utf8_lossy(&out.stdout).trim().is_empty()
+                        }
+                        Err(_) => true,
+                    };
+                    let b = if has_head {
+                        run_git(Some(&p), &["branch", "--show-current"])
+                            .ok()
+                            .and_then(|out| {
+                                if out.status.success() {
+                                    let s = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+                                    if !s.is_empty() {
+                                        Some(s)
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_else(|| "main".to_owned())
+                    } else {
+                        "main".to_owned()
+                    };
+                    (has_head, is_dirty, b)
+                } else {
+                    (false, true, "main".to_owned())
+                };
+                notes.push(json!({
+                    "path": crate::files::clean_os_path(&main_path).to_string_lossy(),
+                    "relative": relative,
+                    "name": main_name,
+                    "initialized": initialized,
+                    "dirty": dirty,
+                    "branch": branch,
+                }));
+            } else {
+                subdirs.push(p);
+            }
+        }
+        for sub in subdirs {
+            scan_dir(&sub, root, notes, depth + 1);
+        }
+    }
+
+    scan_dir(&canonical_root, &canonical_root, &mut notes, 0);
+
+    Ok(json!({
+        "available": true,
+        "notes": notes,
+    }))
+}
+
 #[tauri::command]
 pub async fn vcs_operation(
     app: tauri::AppHandle,
@@ -502,6 +663,11 @@ pub async fn vcs_operation(
             let state = app.state::<crate::files::Files>();
             let _guard = state.0.lock().map_err(fail)?;
             status(Path::new(&root), Path::new(&path))
+        }
+        VcsOperation::WorkspaceStatus { root } => {
+            let state = app.state::<crate::files::Files>();
+            let _guard = state.0.lock().map_err(fail)?;
+            workspace_status(Path::new(&root))
         }
         VcsOperation::Commit {
             root,
@@ -531,6 +697,11 @@ pub async fn vcs_operation(
             let state = app.state::<crate::files::Files>();
             let _guard = state.0.lock().map_err(fail)?;
             restore(Path::new(&root), Path::new(&path), &hash)
+        }
+        VcsOperation::Discard { root, path } => {
+            let state = app.state::<crate::files::Files>();
+            let _guard = state.0.lock().map_err(fail)?;
+            discard(Path::new(&root), Path::new(&path))
         }
     })
     .await
@@ -652,5 +823,52 @@ mod tests {
         let after_restore = status(&root, Path::new(&renamed.path)).unwrap();
         assert_eq!(after_restore["commits"].as_array().unwrap().len(), 3);
         assert_eq!(after_restore["dirty"], true);
+    }
+
+    #[test]
+    fn workspace_status_reports_multiple_notes_and_discard_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        let store = FileStore::new(dir.path().join("app")).unwrap();
+        let empty = json!({"version":1,"images":{}});
+
+        let _doc1 = store
+            .create_in_root(&root, Some("note1.md"), "v1", &empty, None, &[], false)
+            .unwrap();
+
+        let doc2 = store
+            .create_in_root(&root, Some("note2.md"), "v2", &empty, None, &[], false)
+            .unwrap();
+        commit(&root, Path::new(&doc2.path), "Initial note 2").unwrap();
+
+        let doc3 = store
+            .create_in_root(&root, Some("note3.md"), "v3", &empty, None, &[], false)
+            .unwrap();
+        commit(&root, Path::new(&doc3.path), "Initial note 3").unwrap();
+        fs::write(&doc3.path, "v3 edited content").unwrap();
+
+        let ws = workspace_status(&root).unwrap();
+        assert_eq!(ws["available"], true);
+        let notes = ws["notes"].as_array().unwrap();
+        assert_eq!(notes.len(), 3);
+
+        let n1 = notes.iter().find(|n| n["name"] == "note1.md").unwrap();
+        assert_eq!(n1["initialized"], false);
+        assert_eq!(n1["dirty"], true);
+
+        let n2 = notes.iter().find(|n| n["name"] == "note2.md").unwrap();
+        assert_eq!(n2["initialized"], true);
+        assert_eq!(n2["dirty"], false);
+
+        let n3 = notes.iter().find(|n| n["name"] == "note3.md").unwrap();
+        assert_eq!(n3["initialized"], true);
+        assert_eq!(n3["dirty"], true);
+
+        // Discard note 3 changes
+        discard(&root, Path::new(&doc3.path)).unwrap();
+        let after_discard = status(&root, Path::new(&doc3.path)).unwrap();
+        assert_eq!(after_discard["dirty"], false);
+        assert_eq!(fs::read_to_string(&doc3.path).unwrap(), "v3");
     }
 }

@@ -34,6 +34,8 @@ test('shortcuts preserve native unrelated keys and IME composition', () => {
   expect(tabShortcut({ ...e, isComposing: true })).toBeUndefined();
   expect(tabShortcut({ ...e, altKey: true })).toBeUndefined();
   expect(tabShortcut({ ...e, key: 't', shiftKey: true, metaKey: true })).toBe('reopen');
+  expect(tabShortcut({ ...e, key: 'g', shiftKey: true })).toBe('git');
+  expect(tabShortcut({ ...e, key: 'h', shiftKey: true })).toBe('timeline');
   expect(tabShortcut({ ...e, key: 'Tab', shiftKey: true })).toBe('previous');
   expect(tabShortcut({ ...e, key: 's' })).toBeUndefined();
 });
@@ -78,6 +80,7 @@ test('VS Code workspace shortcuts open Explorer, Search, Source Control, and tog
   expect(tabShortcut(key)).toBe('explorer');
   expect(tabShortcut({ ...key, key: 'f' })).toBe('search');
   expect(tabShortcut({ ...key, key: 'g' })).toBe('git');
+  expect(tabShortcut({ ...key, key: 'h' })).toBe('timeline');
   expect(tabShortcut({ ...key, key: 'b', shiftKey: false })).toBe('sidebar');
   expect(tabShortcut({ ...key, key: 'z', ctrlKey: false, shiftKey: false, altKey: true })).toBe('wrap');
   expect(tabShortcut({ ...key, isComposing: true })).toBeUndefined();
