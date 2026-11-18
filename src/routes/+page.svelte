@@ -40,6 +40,7 @@
   let searchMatches = $derived(files.searchWorkspace(query, workspace.buffers, searchEntries, workspace.root));
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
   let renamingTarget = $state<{ kind: 'buffer'; id: string } | { kind: 'path'; path: string } | null>(null), renameValue = $state('');
+  let renameInitial = '', renameSubmitting = false;
   let closeTarget = $state<string | null>(null);
   let closeDialog: HTMLDialogElement;
   let deleteTarget = $state<{ path: string; name: string } | null>(null);
@@ -298,105 +299,163 @@
     notice = `Saved ${files.title(workspace.buffers.find(b => b.id === current.id) ?? current)}.`;
     return true;
   }
+  async function ensureExplorerVisible() {
+    if (!workspace.sidebar || panel !== 'explorer') {
+      panel = 'explorer';
+      workspace = { ...workspace, sidebar: true };
+      await refresh();
+      scheduleRecovery();
+    }
+  }
+  async function focusRenameInput() {
+    await tick();
+    const input = document.getElementById('rename-input') as HTMLInputElement | null;
+    if (!input) return;
+    input.scrollIntoView({ block: 'nearest' });
+    input.focus();
+    const dot = renameValue.lastIndexOf('.');
+    input.setSelectionRange(0, dot > 0 ? dot : renameValue.length);
+  }
   async function beginRename(id = workspace.active) {
     if (frozen || !id) return;
     const buffer = workspace.buffers.find(b => b.id === id);
     if (!buffer) return;
-    renamingTarget = { kind: 'buffer', id: buffer.id };
-    renameValue = buffer.path ? (buffer.path.split(/[/\\]/).at(-1) ?? '') : (buffer.name ?? 'Untitled-1');
-    await tick();
-    const input = document.getElementById('rename-input') as HTMLInputElement | null;
-    input?.focus();
-    input?.select();
+    await ensureExplorerVisible();
+    const latest = workspace.buffers.find(b => b.id === id) ?? buffer;
+    const initial = latest.path ? (latest.path.split(/[/\\]/).at(-1) ?? '') : (latest.name ?? 'Untitled-1');
+    renamingTarget = { kind: 'buffer', id: latest.id };
+    renameValue = initial;
+    renameInitial = initial;
+    await focusRenameInput();
   }
   async function beginRenamePath(path: string) {
     if (frozen || !path || !workspace.root || !files.withinRoot(path, workspace.root)) return;
     const open = workspace.buffers.find(b => b.path && files.samePath(b.path, path));
     if (open) { await beginRename(open.id); return; }
+    await ensureExplorerVisible();
+    const initial = path.split(/[/\\]/).at(-1) ?? '';
     renamingTarget = { kind: 'path', path };
-    renameValue = path.split(/[/\\]/).at(-1) ?? '';
-    await tick();
-    const input = document.getElementById('rename-input') as HTMLInputElement | null;
-    input?.focus();
-    input?.select();
+    renameValue = initial;
+    renameInitial = initial;
+    await focusRenameInput();
   }
-  function submitRename(event: SubmitEvent) {
-    event.preventDefault();
+  function cancelRename() {
+    renamingTarget = null;
+    view?.focus();
+  }
+  function commitRename(source: 'enter' | 'blur') {
+    if (!renamingTarget || renameSubmitting || busy || frozen) return;
     const target = renamingTarget;
-    if (!target) return;
+    const raw = renameValue.trim();
+    if (!raw || raw === renameInitial) {
+      renamingTarget = null;
+      if (source === 'enter') view?.focus();
+      return;
+    }
+    renameSubmitting = true;
     run(async () => {
-      capture();
-      if (target.kind === 'path') {
-        const open = workspace.buffers.find(b => b.path && files.samePath(b.path, target.path));
-        if (!open) {
-          if (!workspace.root || !files.withinRoot(target.path, workspace.root)) { renamingTarget = null; return; }
-          const currentName = target.path.split(/[/\\]/).at(-1) ?? '';
+      try {
+        capture();
+        if (target.kind === 'path') {
+          const open = workspace.buffers.find(b => b.path && files.samePath(b.path, target.path));
+          if (!open) {
+            if (!workspace.root || !files.withinRoot(target.path, workspace.root)) { renamingTarget = null; return; }
+            const currentName = target.path.split(/[/\\]/).at(-1) ?? '';
+            const dot = currentName.lastIndexOf('.');
+            const fallbackExt = dot >= 0 && dot < currentName.length - 1 ? currentName.slice(dot + 1) : 'md';
+            const valid = files.validateFileName(renameValue, fallbackExt);
+            const disk = await files.operation<files.DiskDocument>({ kind: 'rename', root: workspace.root, path: target.path, name: valid });
+            renamingTarget = null;
+            await refresh();
+            notice = `Renamed to ${disk.path.split(/[/\\]/).at(-1)}.`;
+            view?.focus();
+            return;
+          }
+        }
+        const id = target.kind === 'buffer'
+          ? target.id
+          : workspace.buffers.find(b => b.path && files.samePath(b.path, target.path))?.id;
+        const buffer = id ? workspace.buffers.find(b => b.id === id) : undefined;
+        if (!buffer) { renamingTarget = null; return; }
+        const isRootFile = Boolean(buffer.path && workspace.root && files.withinRoot(buffer.path, workspace.root) && buffer.external !== 'deleted');
+        if (isRootFile) {
+          const currentName = buffer.path!.split(/[/\\]/).at(-1) ?? '';
           const dot = currentName.lastIndexOf('.');
           const fallbackExt = dot >= 0 && dot < currentName.length - 1 ? currentName.slice(dot + 1) : 'md';
           const valid = files.validateFileName(renameValue, fallbackExt);
-          const disk = await files.operation<files.DiskDocument>({ kind: 'rename', root: workspace.root, path: target.path, name: valid });
+          const disk = await files.operation<files.DiskDocument>({ kind: 'rename', root: workspace.root!, path: buffer.path!, name: valid });
+          const oldLanguage = files.bufferLanguage(buffer);
+          const newLanguage = files.languageFor(disk.path);
+          const dirty = files.modified(buffer);
+          const nextMetadata = dirty
+            ? { ...buffer.metadata, ...(disk.metadata.main ? { main: disk.metadata.main } : {}) }
+            : disk.metadata;
+          if (oldLanguage !== newLanguage) {
+            if (viewId === buffer.id) unmount();
+            states.delete(buffer.id);
+          }
+          patch(buffer.id, {
+            path: disk.path,
+            revision: disk.revision,
+            name: undefined,
+            metadata: nextMetadata,
+            ...(dirty ? {} : { text: disk.text, baseline: files.fingerprint(disk.text, disk.metadata), external: null }),
+          });
+          if (oldLanguage === newLanguage) {
+            if (viewId === buffer.id && view) view.dispatch({ effects: setMetadata.of(nextMetadata) });
+            else if (states.has(buffer.id)) states.set(buffer.id, states.get(buffer.id)!.update({ effects: setMetadata.of(nextMetadata) }).state);
+          }
+          if (oldLanguage !== newLanguage && workspace.active === buffer.id) mount(buffer.id);
           renamingTarget = null;
           await refresh();
+          await checkpoint();
           notice = `Renamed to ${disk.path.split(/[/\\]/).at(-1)}.`;
           view?.focus();
-          return;
+        } else {
+          const valid = files.validateFileName(renameValue, 'md');
+          const oldLanguage = files.bufferLanguage(buffer);
+          const newLanguage = files.bufferLanguage({ path: null, name: valid });
+          if (oldLanguage !== newLanguage) {
+            if (viewId === buffer.id) unmount();
+            states.delete(buffer.id);
+          }
+          patch(buffer.id, { name: valid });
+          if (oldLanguage !== newLanguage && workspace.active === buffer.id) mount(buffer.id);
+          renamingTarget = null;
+          await checkpoint();
+          notice = `Renamed to ${valid}.`;
+          view?.focus();
         }
-      }
-      const id = target.kind === 'buffer'
-        ? target.id
-        : workspace.buffers.find(b => b.path && files.samePath(b.path, target.path))?.id;
-      const buffer = id ? workspace.buffers.find(b => b.id === id) : undefined;
-      if (!buffer) { renamingTarget = null; return; }
-      const isRootFile = Boolean(buffer.path && workspace.root && files.withinRoot(buffer.path, workspace.root) && buffer.external !== 'deleted');
-      if (isRootFile) {
-        const currentName = buffer.path!.split(/[/\\]/).at(-1) ?? '';
-        const dot = currentName.lastIndexOf('.');
-        const fallbackExt = dot >= 0 && dot < currentName.length - 1 ? currentName.slice(dot + 1) : 'md';
-        const valid = files.validateFileName(renameValue, fallbackExt);
-        const disk = await files.operation<files.DiskDocument>({ kind: 'rename', root: workspace.root!, path: buffer.path!, name: valid });
-        const oldLanguage = files.bufferLanguage(buffer);
-        const newLanguage = files.languageFor(disk.path);
-        const dirty = files.modified(buffer);
-        const nextMetadata = dirty
-          ? { ...buffer.metadata, ...(disk.metadata.main ? { main: disk.metadata.main } : {}) }
-          : disk.metadata;
-        if (oldLanguage !== newLanguage) {
-          if (viewId === buffer.id) unmount();
-          states.delete(buffer.id);
-        }
-        patch(buffer.id, {
-          path: disk.path,
-          revision: disk.revision,
-          name: undefined,
-          metadata: nextMetadata,
-          ...(dirty ? {} : { text: disk.text, baseline: files.fingerprint(disk.text, disk.metadata), external: null }),
-        });
-        if (oldLanguage === newLanguage) {
-          if (viewId === buffer.id && view) view.dispatch({ effects: setMetadata.of(nextMetadata) });
-          else if (states.has(buffer.id)) states.set(buffer.id, states.get(buffer.id)!.update({ effects: setMetadata.of(nextMetadata) }).state);
-        }
-        if (oldLanguage !== newLanguage && workspace.active === buffer.id) mount(buffer.id);
-        renamingTarget = null;
-        await refresh();
-        await checkpoint();
-        notice = `Renamed to ${disk.path.split(/[/\\]/).at(-1)}.`;
-        view?.focus();
-      } else {
-        const valid = files.validateFileName(renameValue, 'md');
-        const oldLanguage = files.bufferLanguage(buffer);
-        const newLanguage = files.bufferLanguage({ path: null, name: valid });
-        if (oldLanguage !== newLanguage) {
-          if (viewId === buffer.id) unmount();
-          states.delete(buffer.id);
-        }
-        patch(buffer.id, { name: valid });
-        if (oldLanguage !== newLanguage && workspace.active === buffer.id) mount(buffer.id);
-        renamingTarget = null;
-        await checkpoint();
-        notice = `Renamed to ${valid}.`;
-        view?.focus();
+      } catch (error) {
+        if (source === 'blur') renamingTarget = null;
+        else void focusRenameInput();
+        throw error;
+      } finally {
+        renameSubmitting = false;
       }
     });
+  }
+  function onRenameKeydown(event: KeyboardEvent) {
+    if (event.isComposing) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      cancelRename();
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      event.stopPropagation();
+      commitRename('enter');
+    }
+  }
+  function onRenameBlur(event: FocusEvent) {
+    if (!renamingTarget || renameSubmitting) return;
+    if ((event.relatedTarget as HTMLElement | null)?.closest('.command-menu')) return;
+    commitRename('blur');
+  }
+  function isRenamingEntry(entry: files.Entry, openBuffer?: files.Buffer): boolean {
+    if (!renamingTarget || entry.directory) return false;
+    if (renamingTarget.kind === 'path') return files.samePath(renamingTarget.path, entry.path);
+    return Boolean(openBuffer && !files.isUnsavedBuffer(openBuffer, workspace.root) && renamingTarget.id === openBuffer.id);
   }
   async function closeFile(id: string, choice?: 'save' | 'discard') {
     capture();
@@ -496,7 +555,7 @@
     unmount(); states.delete(id); patch(id, { ...disk, baseline: files.fingerprint(disk.text, disk.metadata), external: null }); mount(id); await checkpoint();
   }
   async function poll() {
-    if (polling || busy || frozen || loading || annotation || startupError) return;
+    if (polling || busy || frozen || loading || annotation || renamingTarget || startupError) return;
     polling = true;
     try {
       capture();
@@ -638,7 +697,6 @@
     const inRoot = Boolean(onDisk && workspace.root && files.withinRoot(buffer.path, workspace.root));
     const items: MenuEntry[] = [
       { label: 'Save', shortcut: 'Ctrl+S', action: () => saveFile(buffer.id).then(() => {}) },
-      { label: 'Rename', shortcut: 'F2', action: () => beginRename(buffer.id) },
       ...(onDisk ? [
         { label: 'Reveal in Explorer', action: () => revealPath(buffer.path!) },
         { label: 'Copy path', action: () => copyPath(buffer.path!) },
@@ -694,7 +752,6 @@
     event.stopPropagation();
     const items: MenuEntry[] = [
       { label: 'Open', action: () => match.bufferId ? (mount(match.bufferId), jumpToLine(match.line)) : openRootFile(match.path!, match.line) },
-      { label: 'Rename', shortcut: 'F2', action: () => match.bufferId ? beginRename(match.bufferId) : beginRenamePath(match.path!) },
       ...(match.path ? [
         { label: 'Reveal in Explorer', action: () => revealPath(match.path!) },
         { label: 'Copy path', action: () => copyPath(match.path!) },
@@ -758,7 +815,6 @@
       },
       { label: 'Find', shortcut: 'Ctrl+F', action: openFind },
       'separator',
-      { label: 'Rename', shortcut: 'F2', action: () => beginRename(targetId) },
       { label: 'Save', shortcut: 'Ctrl+S', action: () => saveFile(targetId).then(() => {}) },
     ];
     void showContextMenu(event.clientX, event.clientY, items);
@@ -926,17 +982,25 @@
         {#if unsavedBuffers.length}
           <div class="sidebar-section-label">Unsaved ({unsavedBuffers.length})</div>
           {#each unsavedBuffers as buffer (buffer.id)}
-            <button
-              class="library-row"
-              class:current={workspace.active === buffer.id}
-              title={buffer.path ? `${files.displayPath(buffer.path)} (outside root)` : `${files.title(buffer)} (Unsaved)`}
-              onclick={() => run(() => { mount(buffer.id); view?.focus(); })}
-              oncontextmenu={event => unsavedEntryContext(event, buffer)}
-            >
-              <span>·</span>
-              <span class="file-name">{files.title(buffer)}{files.modified(buffer) ? ' ●' : ''}</span>
-              <span class="file-unsaved-tag">unsaved</span>
-            </button>
+            {#if renamingTarget?.kind === 'buffer' && renamingTarget.id === buffer.id}
+              <div class="library-row renaming">
+                <span>·</span>
+                <input id="rename-input" class="sidebar-rename-input" aria-label="Rename file" bind:value={renameValue} onkeydown={onRenameKeydown} onblur={onRenameBlur}/>
+              </div>
+            {:else}
+              <button
+                class="library-row"
+                class:current={workspace.active === buffer.id}
+                title={buffer.path ? `${files.displayPath(buffer.path)} (outside root)` : `${files.title(buffer)} (Unsaved)`}
+                onclick={() => run(() => { mount(buffer.id); view?.focus(); })}
+                onkeydown={event => { if (event.key === 'F2') { event.preventDefault(); event.stopPropagation(); run(() => beginRename(buffer.id)); } }}
+                oncontextmenu={event => unsavedEntryContext(event, buffer)}
+              >
+                <span>·</span>
+                <span class="file-name">{files.title(buffer)}{files.modified(buffer) ? ' ●' : ''}</span>
+                <span class="file-unsaved-tag">unsaved</span>
+              </button>
+            {/if}
           {/each}
         {/if}
         {#if workspace.root}
@@ -945,18 +1009,26 @@
           {/if}
           {#each explorerEntries as entry (entry.path)}
             {@const openBuffer = workspace.buffers.find(b => b.path && files.samePath(b.path, entry.path))}
-            <button
-              class="library-row"
-              class:current={Boolean(active?.path && files.samePath(active.path, entry.path))}
-              title={files.displayPath(entry.path)}
-              aria-disabled={entry.directory}
-              style:padding-left={`${12 + files.entryDepth(entry) * 12}px`}
-              onclick={() => { if (!entry.directory) run(() => openRootFile(entry.path)); }}
-              oncontextmenu={event => rootEntryContext(event, entry)}
-            >
-              <span>{entry.directory ? '▾' : '·'}</span>
-              <span class="file-name">{files.entryLabel(entry)}{openBuffer && files.modified(openBuffer) ? ' ●' : ''}</span>
-            </button>
+            {#if isRenamingEntry(entry, openBuffer)}
+              <div class="library-row renaming" style:padding-left={`${12 + files.entryDepth(entry) * 12}px`}>
+                <span>·</span>
+                <input id="rename-input" class="sidebar-rename-input" aria-label="Rename file" bind:value={renameValue} onkeydown={onRenameKeydown} onblur={onRenameBlur}/>
+              </div>
+            {:else}
+              <button
+                class="library-row"
+                class:current={Boolean(active?.path && files.samePath(active.path, entry.path))}
+                title={files.displayPath(entry.path)}
+                aria-disabled={entry.directory}
+                style:padding-left={`${12 + files.entryDepth(entry) * 12}px`}
+                onclick={() => { if (!entry.directory) run(() => openRootFile(entry.path)); }}
+                onkeydown={event => { if (event.key === 'F2' && !entry.directory) { event.preventDefault(); event.stopPropagation(); run(() => beginRenamePath(entry.path)); } }}
+                oncontextmenu={event => rootEntryContext(event, entry)}
+              >
+                <span>{entry.directory ? '▾' : '·'}</span>
+                <span class="file-name">{files.entryLabel(entry)}{openBuffer && files.modified(openBuffer) ? ' ●' : ''}</span>
+              </button>
+            {/if}
           {/each}
         {/if}
       {/if}
@@ -978,7 +1050,6 @@
           {:else}<button class:danger={item.danger} disabled={item.disabled} onclick={() => command(item.action)}>{item.label}{#if item.shortcut}<kbd>{item.shortcut}</kbd>{/if}</button>{/if}
         {/each}
       </div>
-      {#if renamingTarget}<form class="rename-bar" onsubmit={submitRename}><label for="rename-input" class="text-xs text-[var(--text-secondary)]">Rename</label><input id="rename-input" aria-label="New file name" bind:value={renameValue} onkeydown={event => { if (event.key === 'Escape') { event.preventDefault(); renamingTarget = null; view?.focus(); } }}/><button>Apply</button><button type="button" onclick={() => { renamingTarget = null; view?.focus(); }}>Cancel</button></form>{/if}
       {#if findVisible}<form class="find-bar" onsubmit={find}><input id="find" aria-label="Find in file" bind:value={findQuery} placeholder="Find…" onkeydown={event => { if (event.key === 'Escape') { findVisible = false; view?.focus(); } }}/><button>Find next</button><button type="button" aria-label="Close find" onclick={() => { findVisible = false; view?.focus(); }}>×</button></form>{/if}
       <div id="file-panel" role="tabpanel" tabindex="0" aria-label="Active file" class="relative min-h-0 min-w-0 flex-1" oncontextmenu={editorContext}>
         <div class="h-full" class:hidden={!active} bind:this={host}></div>

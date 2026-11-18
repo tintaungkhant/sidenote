@@ -565,7 +565,7 @@
     width: min(640px, calc(100% - 32px));
     padding: 10px 14px;
     border-radius: 8px;
-    border: 1px solid rgba(99, 102, 241, 0.45);
+    border: 1px solid #2d303d;
     background: rgba(14, 15, 20, 0.94);
     backdrop-filter: blur(8px);
     box-shadow: 0 12px 32px rgba(0, 0, 0, 0.65);
@@ -607,9 +607,6 @@
     text-align: inherit;
     overflow-wrap: anywhere;
     user-select: text;
-  }
-  .image-caption-field textarea:focus-visible {
-    box-shadow: inset 0 -1px 0 #6366f1;
   }
   .image-caption-field textarea::placeholder {
     color: rgba(255, 255, 255, 0.5);
@@ -734,8 +731,10 @@
     min-height: 1.2em;
     margin: 0;
     padding: 0;
-    border: 1px solid #6366f1;
+    border: 1px solid rgba(255, 255, 255, 0.28);
     border-radius: 3px;
+    outline: none;
+    box-shadow: none;
     background: rgba(14, 15, 18, 0.9);
     font-family: sans-serif;
     line-height: 1.2;

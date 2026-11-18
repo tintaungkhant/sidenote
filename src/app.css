@@ -73,9 +73,20 @@ button:disabled, select:disabled, input:disabled {
   opacity: 0.45;
 }
 
-button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+button:focus,
+button:focus-visible,
+select:focus,
+select:focus-visible,
+input:focus,
+input:focus-visible,
+textarea:focus,
+textarea:focus-visible,
+dialog:focus,
+dialog:focus-visible,
+[tabindex]:focus,
+[tabindex]:focus-visible,
+.cm-editor.cm-focused {
+  outline: none;
 }
 
 /* Base button */
@@ -104,11 +115,18 @@ input, select, textarea {
   color: var(--text-primary);
   padding: 5px 9px;
   font-size: 12px;
-  transition: border-color 120ms ease, box-shadow 120ms ease;
+  outline: none;
+  box-shadow: none;
 }
-input:focus, select:focus, textarea:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent);
+input:focus,
+input:focus-visible,
+select:focus,
+select:focus-visible,
+textarea:focus,
+textarea:focus-visible {
+  border-color: #3a3d4e;
+  outline: none;
+  box-shadow: none;
 }
 input::placeholder, textarea::placeholder {
   color: var(--text-muted);
@@ -313,14 +331,16 @@ fieldset {
   border-radius: 5px;
   color: var(--text-primary);
 }
-.command-menu button:hover:not(:disabled) {
+.command-menu button:hover:not(:disabled),
+.command-menu button:focus-visible:not(:disabled) {
   background: rgba(99, 102, 241, 0.2);
   color: #fff;
 }
 .command-menu button.danger {
   color: #f87171;
 }
-.command-menu button.danger:hover:not(:disabled) {
+.command-menu button.danger:hover:not(:disabled),
+.command-menu button.danger:focus-visible:not(:disabled) {
   background: rgba(239, 68, 68, 0.18);
   color: #fca5a5;
 }
@@ -539,6 +559,26 @@ fieldset {
   color: #ffffff;
   font-weight: 500;
 }
+.library-row.renaming {
+  padding-block: 2px;
+  background: rgba(255, 255, 255, 0.04);
+}
+.sidebar-rename-input,
+.sidebar-rename-input:focus,
+.sidebar-rename-input:focus-visible {
+  flex: 1;
+  min-width: 0;
+  height: 22px;
+  padding: 1px 6px;
+  font-size: 12px;
+  line-height: 1.2;
+  color: var(--text-primary);
+  background: #0f1015;
+  border: 1px solid #3a3d4e;
+  border-radius: 3px;
+  outline: none;
+  box-shadow: none;
+}
 .file-badge {
   font-size: 9px;
   font-family: ui-monospace, monospace;
@@ -713,21 +753,6 @@ fieldset {
 .find-bar button {
   padding: 3px 7px;
   font-size: 11px;
-}
-
-/* Rename Bar */
-.rename-bar {
-  display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 14px;
-  border-bottom: 1px solid var(--border);
-  background: #171821;
-}
-.rename-bar input {
-  width: min(320px, 45vw);
-  font-size: 12px;
 }
 
 /* Empty State Workspace (Developer dashboard) */
